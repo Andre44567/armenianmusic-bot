@@ -8,6 +8,10 @@ import urllib.request
 import telebot
 
 
+# ──────────────────────────────────────────────
+# CONFIG
+# ──────────────────────────────────────────────
+
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
 if not TOKEN:
@@ -41,7 +45,6 @@ def search_song(query):
 
 
 def download_audio(query):
-    """Ներբեռնում է MP3 ֆայլ yt-dlp-ով"""
     link = search_song(query)
     if not link:
         return None, None
@@ -52,7 +55,9 @@ def download_audio(query):
     try:
         result = subprocess.run(
             [
-                "yt-dlp",
+                "python",
+                "-m",
+                "yt_dlp",
                 "--no-playlist",
                 "-x",
                 "--audio-format", "mp3",
@@ -63,7 +68,7 @@ def download_audio(query):
             ],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=180,
         )
 
         output_path = (
@@ -75,6 +80,7 @@ def download_audio(query):
         if output_path and os.path.exists(output_path):
             return output_path, tmp_dir
 
+        # fallback
         for f in os.listdir(tmp_dir):
             if f.endswith(".mp3"):
                 return os.path.join(tmp_dir, f), tmp_dir
@@ -83,12 +89,11 @@ def download_audio(query):
 
     except subprocess.TimeoutExpired:
         return None, tmp_dir
-    except FileNotFoundError:
+    except Exception:
         return None, tmp_dir
 
 
 def cleanup(tmp_dir):
-    """Ջնջում է ժամանակավոր ֆայլերը"""
     if tmp_dir and os.path.exists(tmp_dir):
         for f in os.listdir(tmp_dir):
             try:
@@ -149,7 +154,7 @@ def download(message):
 
     status_msg = bot.send_message(
         message.chat.id,
-        f"⏳ Ներբեռնում եմ՝ {query}...\nՍա կարող է 30-60 վայրկյան տևել։"
+        f"⏳ Ներբեռնում եմ՝ {query}...\nՍա կարող է 30-90 վայրկյան տևել։"
     )
 
     file_path, tmp_dir = download_audio(query)
@@ -181,8 +186,9 @@ def download(message):
     else:
         bot.edit_message_text(
             "❌ Ներբեռնումը ձախողվեց։\n"
-            "• Համոզվիր, որ `yt-dlp` տեղադրված է (pip install yt-dlp)\n"
-            "• Կամ հնարավոր է YouTube-ը սահմանափակում է",
+            "• Համոզվիր, որ yt-dlp տեղադրված է\n"
+            "• Համոզվիր, որ ffmpeg կա համակարգում\n"
+            "• Կամ փորձիր ուրիշ երգ",
             message.chat.id,
             status_msg.message_id,
         )
@@ -251,3 +257,4 @@ def unknown(message):
 
 print("✅ Բոտը գործում է...")
 bot.polling(none_stop=True)
+                    
