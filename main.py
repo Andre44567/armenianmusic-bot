@@ -6,7 +6,7 @@ import telebot
 from flask import Flask
 from threading import Thread
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TOKEN = os.environ.get("BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
 app = Flask(__name__)
