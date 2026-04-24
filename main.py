@@ -17,8 +17,7 @@ def update_yt_dlp():
         print("🔄 Թարմացնում եմ yt-dlp...")
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
-            check=True,
-            capture_output=True
+            check=True, capture_output=True
         )
         print("✅ yt-dlp թարմացվեց")
     except Exception as e:
@@ -32,12 +31,10 @@ update_yt_dlp()
 # ─────────────────────────────
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-
 if not TOKEN:
     raise ValueError("❌ TELEGRAM_BOT_TOKEN չկա")
 
 bot = telebot.TeleBot(TOKEN)
-
 playlists = {}
 
 YOUTUBE_REGEX = re.compile(
@@ -72,37 +69,29 @@ def start(message):
 def update_command(message):
     msg = bot.send_message(message.chat.id, "🔄 Թարմացնում եմ yt-dlp...")
     try:
-        result = subprocess.run(
+        subprocess.run(
             [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
-            check=True,
-            capture_output=True,
-            text=True
+            check=True, capture_output=True, text=True
         )
-
-        # Տարբերակը ստանալ
         version = yt_dlp.version.__version__
-
         bot.edit_message_text(
             f"✅ yt-dlp թարմացվեց\n📦 Տարբերակ: {version}",
-            message.chat.id,
-            msg.message_id
+            message.chat.id, msg.message_id
         )
     except Exception as e:
         bot.edit_message_text(
             f"❌ Թարմացումը ձախողվեց\n{e}",
-            message.chat.id,
-            msg.message_id
+            message.chat.id, msg.message_id
         )
 
 
 # ─────────────────────────────
-# SEARCH
+# SEARCH — Ուղղված
 # ─────────────────────────────
 
 @bot.message_handler(commands=['search'])
 def search(message):
     parts = message.text.split(maxsplit=1)
-
     if len(parts) < 2:
         bot.send_message(message.chat.id, "⚠️ Գրիր՝ /search երգի անուն")
         return
@@ -111,17 +100,26 @@ def search(message):
     bot.send_message(message.chat.id, "🔍 Որոնում եմ...")
 
     try:
-        ydl_opts = {"quiet": True, "noplaylist": True}
+        ydl_opts = {
+            "quiet": True,
+            "noplaylist": True,
+            "extract_flat": False,
+            # Cookie-ի խնդիրը շրջանցելու համար
+            "extractor_args": {"youtube": {"skip": ["dash", "hls"]}},
+        }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"ytsearch1:{query}", download=False)
 
-        if "entries" in info:
-            info = info["entries"][0]
+        if not info or "entries" not in info or not info["entries"]:
+            bot.send_message(message.chat.id, "❌ Չգտնվեց")
+            return
 
-        title = info.get("title", "Անհայտ")
-        url = info.get("webpage_url", "")
-        duration = info.get("duration", 0)
-        mins, secs = divmod(duration, 60)
+        entry = info["entries"][0]
+        title = entry.get("title", "Անհայտ")
+        url = entry.get("webpage_url") or entry.get("url", "")
+        duration = entry.get("duration", 0) or 0
+        mins, secs = divmod(int(duration), 60)
 
         bot.send_message(
             message.chat.id,
@@ -132,48 +130,89 @@ def search(message):
 
     except Exception as e:
         print("SEARCH ERROR:", e)
-        bot.send_message(message.chat.id, "❌ Չգտնվեց")
+        bot.send_message(message.chat.id, f"❌ Չգտնվեց\n⚠️ {str(e)[:100]}")
 
 
 # ─────────────────────────────
-# DOWNLOAD CORE
+# DOWNLOAD CORE — Ուղղված
 # ─────────────────────────────
 
 def download_audio(query_or_url):
     tmp_dir = tempfile.mkdtemp()
-    is_url = bool(YOUTUBE_REGEX.match(query_or_url))
-    source = query_or_url if is_url else f"ytsearch1:{query_or_url}"
+    is_url = bool(YOUTUBE_REGEX.match(query_or_url.strip()))
+    source = query_or_url.strip() if is_url else f"ytsearch1:{query_or_url}"
 
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
         "noplaylist": True,
-        "quiet": True,
+        "quiet": False,  # Debug համար True-ից False
+        # ffmpeg չկա — ուղղակի audio ներբեռնել առանց convert
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
-            "preferredquality": "192",
+            "preferredquality": "128",
         }],
+        "extractor_args": {"youtube": {"skip": ["dash", "hls"]}},
     }
 
-    title = None
+    title = "Անհայտ"
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(source, download=True)
-            if "entries" in info:
-                title = info["entries"][0].get("title", "Անհայտ")
-            else:
-                title = info.get("title", "Անհայտ")
+            if info:
+                if "entries" in info and info["entries"]:
+                    title = info["entries"][0].get("title", "Անհայտ")
+                else:
+                    title = info.get("title", "Անհայտ")
 
+        # MP3 կամ ցանկացած audio ֆայլ
         for f in os.listdir(tmp_dir):
-            if f.endswith(".mp3"):
+            if f.endswith((".mp3", ".m4a", ".webm", ".ogg", ".opus")):
                 return os.path.join(tmp_dir, f), tmp_dir, title
 
         return None, tmp_dir, None
 
     except Exception as e:
         print("DOWNLOAD ERROR:", e)
+        return None, tmp_dir, None
+
+
+# ffmpeg չկա — առանց postprocessor փորձ
+def download_audio_no_ffmpeg(query_or_url):
+    tmp_dir = tempfile.mkdtemp()
+    is_url = bool(YOUTUBE_REGEX.match(query_or_url.strip()))
+    source = query_or_url.strip() if is_url else f"ytsearch1:{query_or_url}"
+
+    ydl_opts = {
+        # m4a/webm/opus — ffmpeg-ից առանց
+        "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+        "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
+        "noplaylist": True,
+        "quiet": False,
+        "extractor_args": {"youtube": {"skip": ["dash", "hls"]}},
+    }
+
+    title = "Անհայտ"
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(source, download=True)
+            if info:
+                if "entries" in info and info["entries"]:
+                    title = info["entries"][0].get("title", "Անհայտ")
+                else:
+                    title = info.get("title", "Անհայտ")
+
+        for f in os.listdir(tmp_dir):
+            if f.endswith((".mp3", ".m4a", ".webm", ".ogg", ".opus")):
+                return os.path.join(tmp_dir, f), tmp_dir, title
+
+        return None, tmp_dir, None
+
+    except Exception as e:
+        print("DOWNLOAD NO-FFMPEG ERROR:", e)
         return None, tmp_dir, None
 
 
@@ -193,7 +232,6 @@ def cleanup(tmp_dir):
 @bot.message_handler(commands=['download'])
 def download(message):
     parts = message.text.split(maxsplit=1)
-
     if len(parts) < 2:
         bot.send_message(message.chat.id, "⚠️ Գրիր՝ /download երգի անուն")
         return
@@ -201,15 +239,26 @@ def download(message):
     query = parts[1]
     msg = bot.send_message(message.chat.id, "⏳ Ներբեռնում եմ...")
 
+    # Առաջին փորձ — ffmpeg-ով
     file_path, tmp_dir, title = download_audio(query)
+
+    # Եթե ձախողվեց — առանց ffmpeg
+    if not file_path or not os.path.exists(file_path):
+        cleanup(tmp_dir)
+        bot.edit_message_text("⚠️ Փորձում եմ այլ եղանակով...", message.chat.id, msg.message_id)
+        file_path, tmp_dir, title = download_audio_no_ffmpeg(query)
 
     if file_path and os.path.exists(file_path):
         bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
         with open(file_path, "rb") as audio:
-            bot.send_audio(message.chat.id, audio, title=title)
+            bot.send_audio(message.chat.id, audio, title=title, performer="YouTube")
         bot.delete_message(message.chat.id, msg.message_id)
     else:
-        bot.edit_message_text("❌ Չստացվեց ներբեռնել", message.chat.id, msg.message_id)
+        bot.edit_message_text(
+            "❌ Չստացվեց ներբեռնել\n"
+            "💡 Փորձիր /update հրամանը, հետո նորից",
+            message.chat.id, msg.message_id
+        )
 
     cleanup(tmp_dir)
 
@@ -220,90 +269,26 @@ def download(message):
 
 @bot.message_handler(func=lambda m: bool(YOUTUBE_REGEX.search(m.text or "")))
 def handle_youtube_url(message):
-    url = YOUTUBE_REGEX.search(message.text).group(0)
+    match = YOUTUBE_REGEX.search(message.text)
+    url = match.group(0)
+
     msg = bot.send_message(message.chat.id, "🔗 YouTube հղում հայտնաբերվեց, ներբեռնում եմ...")
 
     file_path, tmp_dir, title = download_audio(url)
 
+    if not file_path or not os.path.exists(file_path):
+        cleanup(tmp_dir)
+        bot.edit_message_text("⚠️ Փորձում եմ այլ եղանակով...", message.chat.id, msg.message_id)
+        file_path, tmp_dir, title = download_audio_no_ffmpeg(url)
+
     if file_path and os.path.exists(file_path):
         bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
         with open(file_path, "rb") as audio:
-            bot.send_audio(message.chat.id, audio, title=title)
+            bot.send_audio(message.chat.id, audio, title=title, performer="YouTube")
         bot.delete_message(message.chat.id, msg.message_id)
     else:
-        bot.edit_message_text("❌ Չստացվեց ներբեռնել", message.chat.id, msg.message_id)
-
-    cleanup(tmp_dir)
-
-
-# ─────────────────────────────
-# PLAYLIST ADD
-# ─────────────────────────────
-
-@bot.message_handler(commands=['add'])
-def add(message):
-    parts = message.text.split(maxsplit=1)
-
-    if len(parts) < 2:
-        bot.send_message(message.chat.id, "⚠️ Գրիր՝ /add երգ")
-        return
-
-    uid = message.from_user.id
-    playlists.setdefault(uid, []).append(parts[1])
-    bot.send_message(message.chat.id, "✅ Ավելացվեց")
-
-
-# ─────────────────────────────
-# PLAYLIST SHOW
-# ─────────────────────────────
-
-@bot.message_handler(commands=['playlist'])
-def playlist(message):
-    uid = message.from_user.id
-
-    if uid not in playlists or not playlists[uid]:
-        bot.send_message(message.chat.id, "📋 Դատարկ է")
-        return
-
-    text = "📋 Քո պլեյլիստը՝\n\n"
-    for i, s in enumerate(playlists[uid], 1):
-        text += f"{i}. 🎵 {s}\n"
-
-    bot.send_message(message.chat.id, text)
-
-
-# ─────────────────────────────
-# REMOVE
-# ─────────────────────────────
-
-@bot.message_handler(commands=['remove'])
-def remove(message):
-    parts = message.text.split(maxsplit=1)
-    uid = message.from_user.id
-
-    if len(parts) < 2 or not parts[1].isdigit():
-        bot.send_message(message.chat.id, "⚠️ Գրիր՝ /remove համար")
-        return
-
-    idx = int(parts[1]) - 1
-
-    if uid in playlists and 0 <= idx < len(playlists[uid]):
-        playlists[uid].pop(idx)
-        bot.send_message(message.chat.id, "🗑 Ջնջվեց")
-    else:
-        bot.send_message(message.chat.id, "❌ Սխալ համար")
-
-
-# ─────────────────────────────
-# FALLBACK
-# ─────────────────────────────
-
-@bot.message_handler(func=lambda m: True)
-def unknown(message):
-    bot.send_message(message.chat.id, "❓ Գրիր /help")
-
-
-# ─────────────────────────────
-
-print("✅ BOT RUNNING...")
-bot.polling(none_stop=True)
+        bot.edit_message_text(
+            "❌ Չստացվեց ներբեռնել\n"
+            "💡 Փորձիր /update հրամանը, հետո նորից",
+            message.chat.id, msg.message_id
+        )
