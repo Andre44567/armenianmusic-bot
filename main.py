@@ -1,24 +1,11 @@
+import telebot
 import os
 import re
 import urllib.request
 import urllib.parse
-import telebot
-from flask import Flask
-from threading import Thread
 
-TOKEN = os.environ.get("BOT_TOKEN")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
-
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is alive!"
-
-def run_server():
-    app.run(host='0.0.0.0', port=8080)
-
-Thread(target=run_server).start()
 
 playlists = {}
 
@@ -39,46 +26,46 @@ def search_song(query):
 @bot.message_handler(commands=['start'])
 def start(message):
     bot.send_message(message.chat.id,
-        "🎵 Բари галуст Khachatryans Ерги Бот!\n\n"
-        "🔍 /search ерги анун\n"
-        "➕ /add ерги анун\n"
+        "🎵 Բարի գալուստ Երգի Բոտ!\n\n"
+        "🔍 /search երգի անուն\n"
+        "➕ /add երգի անուն\n"
         "📋 /playlist\n"
-        "🗑 /remove амар")
+        "🗑 /remove համար")
 
 @bot.message_handler(commands=['search'])
 def search(message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        bot.send_message(message.chat.id, "⚠️ Грир՝ /search ерги анун")
+        bot.send_message(message.chat.id, "⚠️ Գրիր՝ /search երգի անուն")
         return
     query = parts[1]
-    bot.send_message(message.chat.id, f"🔍 Воронум ем {query}...")
+    bot.send_message(message.chat.id, f"🔍 Որոնում եմ {query}...")
     link = search_song(query)
     if link:
         bot.send_message(message.chat.id, f"🎵 {query}\n\n🔗 {link}")
     else:
-        bot.send_message(message.chat.id, "😔 Чгтнвец։")
+        bot.send_message(message.chat.id, "😔 Չգտնվեց։")
 
 @bot.message_handler(commands=['add'])
 def add(message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        bot.send_message(message.chat.id, "⚠️ Грир՝ /add ерги анун")
+        bot.send_message(message.chat.id, "⚠️ Գրիր՝ /add երգի անուն")
         return
-    song_name = parts[1]
+    song = parts[1]
     uid = message.from_user.id
     if uid not in playlists:
         playlists[uid] = []
-    playlists[uid].append(song_name)
-    bot.send_message(message.chat.id, f"✅ {song_name} авелацвец!")
+    playlists[uid].append(song)
+    bot.send_message(message.chat.id, f"✅ {song} ավելացվեց!")
 
 @bot.message_handler(commands=['playlist'])
 def playlist(message):
     uid = message.from_user.id
     if uid not in playlists or not playlists[uid]:
-        bot.send_message(message.chat.id, "📋 Плейлистը датарк е։")
+        bot.send_message(message.chat.id, "📋 Պլեյлиստը դատարկ է։")
         return
-    text = "📋 Иmi Плейлистը՝\n\n"
+    text = "📋 Իմ Պլеյlistը՝\n\n"
     for i, s in enumerate(playlists[uid], 1):
         text += f"{i}. 🎵 {s}\n"
     bot.send_message(message.chat.id, text)
@@ -88,18 +75,18 @@ def remove(message):
     parts = message.text.split(maxsplit=1)
     uid = message.from_user.id
     if len(parts) < 2 or not parts[1].isdigit():
-        bot.send_message(message.chat.id, "⚠️ Грир՝ /remove амар")
+        bot.send_message(message.chat.id, "⚠️ Գրիր՝ /remove համար")
         return
     idx = int(parts[1]) - 1
     if uid not in playlists or idx < 0 or idx >= len(playlists[uid]):
-        bot.send_message(message.chat.id, "⚠️ Схал амар։")
+        bot.send_message(message.chat.id, "⚠️ Սխալ համար։")
         return
     removed = playlists[uid].pop(idx)
-    bot.send_message(message.chat.id, f"🗑 {removed} херацвец։")
+    bot.send_message(message.chat.id, f"🗑 {removed} հեռացվեց։")
 
 @bot.message_handler(func=lambda m: True)
 def unknown(message):
-    bot.send_message(message.chat.id, "❓ /search ерги анун гри")
+    bot.send_message(message.chat.id, "❓ /help գրիր")
 
-print("✅ Ботը гордум е...")
+print("✅ Բոտը գործում է...")
 bot.polling(none_stop=True)
