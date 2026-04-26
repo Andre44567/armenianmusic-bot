@@ -69,16 +69,11 @@ def has_ffmpeg():
 FFMPEG_AVAILABLE = has_ffmpeg()
 print(f"ffmpeg: {'✅ կա' if FFMPEG_AVAILABLE else '❌ չկա'}")
 
-# ─── Cookies (YouTube anti-bot bypass) ───
-COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-COOKIES_AVAILABLE = os.path.exists(COOKIES_FILE)
-print(f"cookies.txt: {'✅ կա' if COOKIES_AVAILABLE else '⚠️ չկա (optional)'}")
-
 # ─────────────────────────────
 # START / HELP  ← ՆՈՐ: ուղարկում է նկար
 # ─────────────────────────────
 
-WELCOME_IMAGE_URL = "https://husky-green-dbrtsvmxad.edgeone.app/IMG_20260426_175620_324.jpg ճիշտաՄ"
+WELCOME_IMAGE_URL = "https://husky-green-dbrtsvmxad.edgeone.app/IMG_20260426_175620_324.jpg ճիշտաՄ"  # ← Փոխիր քո ուզած նկարի URL-ով
 
 @bot.message_handler(commands=['start', 'help'])
 def start(message):
@@ -188,20 +183,7 @@ def search(message):
             "quiet": True,
             "noplaylist": True,
             "skip_download": True,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["ios", "android", "web"],
-                    "player_skip": ["webpage", "configs"],
-                }
-            },
-            "http_headers": {
-                "User-Agent": "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)",
-            },
-            "socket_timeout": 30,
-            "retries": 5,
         }
-        if COOKIES_AVAILABLE:
-            ydl_opts["cookiefile"] = COOKIES_FILE
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"ytsearch1:{query}", download=False)
 
@@ -231,134 +213,64 @@ def search(message):
 def download_audio(query_or_url):
     tmp_dir = tempfile.mkdtemp()
     is_url = bool(YOUTUBE_REGEX.match(query_or_url.strip()))
+    source = query_or_url.strip() if is_url else f"ytsearch1:{query_or_url}"
     title = "Անհայտ"
 
-    # YouTube URL → փորձել YouTube, հետո SoundCloud
-    # Տեքստ → SoundCloud որոնում (Railway-ի վրա YouTube blocked է)
-    sources = []
-    if is_url:
-        sources.append(("youtube", query_or_url.strip()))
-        # YouTube URL-ից վերցնել երգի անունը և SoundCloud-ում որոնել
-        query_fallback = query_or_url.strip()
-        sources.append(("soundcloud", f"scsearch1:{query_fallback}"))
-    else:
-        sources.append(("soundcloud", f"scsearch1:{query_or_url}"))
-        sources.append(("youtube", f"ytsearch1:{query_or_url}"))
+    try:
+        if FFMPEG_AVAILABLE:
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
+                "noplaylist": True,
+                "quiet": True,
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "128",
+                }],
+            }
+        else:
+            ydl_opts = {
+                "format": "140/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+                "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
+                "noplaylist": True,
+                "quiet": True,
+            }
 
-    for platform, source in sources:
-        try:
-            if FFMPEG_AVAILABLE:
-                ydl_opts = {
-                    "format": "bestaudio/best",
-                    "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
-                    "noplaylist": True,
-                    "quiet": True,
-                    "postprocessors": [{
-                        "key": "FFmpegExtractAudio",
-                        "preferredcodec": "mp3",
-                        "preferredquality": "128",
-                    }],
-                    "socket_timeout": 30,
-                    "retries": 3,
-                }
-            else:
-                ydl_opts = {
-                    "format": "bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio",
-                    "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
-                    "noplaylist": True,
-                    "quiet": True,
-                    "socket_timeout": 30,
-                    "retries": 3,
-                }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(source, download=True)
+            if info:
+                if "entries" in info and info["entries"]:
+                    title = info["entries"][0].get("title", "Անհայտ")
+                else:
+                    title = info.get("title", "Անհայտ")
 
-            if platform == "youtube" and COOKIES_AVAILABLE:
-                ydl_opts["cookiefile"] = COOKIES_FILE
-            if platform == "youtube":
-                ydl_opts["extractor_args"] = {
-                    "youtube": {"player_client": ["ios", "android"]}
-                }
+        for f in os.listdir(tmp_dir):
+            if f.endswith((".mp3", ".m4a", ".webm", ".ogg", ".opus")):
+                return os.path.join(tmp_dir, f), tmp_dir, title
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(source, download=True)
-                if info:
-                    if "entries" in info and info["entries"]:
-                        title = info["entries"][0].get("title", "Անհայտ")
-                    else:
-                        title = info.get("title", "Անհայտ")
+        print("FILES IN TMP:", os.listdir(tmp_dir))
+        return None, tmp_dir, None
 
-            for f in os.listdir(tmp_dir):
-                if f.endswith((".mp3", ".m4a", ".webm", ".ogg", ".opus")):
-                    print(f"✅ Downloaded via {platform}: {title}")
-                    return os.path.join(tmp_dir, f), tmp_dir, title
-
-        except Exception as e:
-            print(f"⚠️ {platform} failed: {e}")
-            continue
-
-    print("FILES IN TMP:", os.listdir(tmp_dir))
-    return None, tmp_dir, None
+    except Exception as e:
+        print("DOWNLOAD ERROR:", e)
+        return None, tmp_dir, None
 
 # ─────────────────────────────
 # VIDEO DOWNLOAD (TikTok / Instagram)
 # ─────────────────────────────
 
-def _install_gallery_dl():
-    """Auto-install gallery-dl if missing"""
-    try:
-        import gallery_dl
-    except ImportError:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "gallery-dl", "--break-system-packages"],
-            capture_output=True
-        )
-
-
-def download_with_gallery_dl(url, tmp_dir):
-    """gallery-dl-ով ներբեռնում — Instagram/Pinterest/TikTok"""
-    _install_gallery_dl()
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "gallery_dl", url, "-D", tmp_dir, "--no-skip"],
-            capture_output=True, text=True, timeout=60
-        )
-        print("gallery-dl stdout:", result.stdout[:300])
-        print("gallery-dl stderr:", result.stderr[:300])
-        files = os.listdir(tmp_dir)
-        if files:
-            return os.path.join(tmp_dir, files[0])
-        return None
-    except Exception as e:
-        print("gallery-dl ERROR:", e)
-        return None
-
-
 def download_video(url):
     tmp_dir = tempfile.mkdtemp()
     title = "Անհայտ"
 
-    # Նախ gallery-dl փորձ
-    file_path = download_with_gallery_dl(url, tmp_dir)
-    if file_path and os.path.exists(file_path):
-        title = os.path.splitext(os.path.basename(file_path))[0]
-        return file_path, tmp_dir, title
-
-    # Fallback — yt-dlp
     try:
         ydl_opts = {
             "format": "best[ext=mp4]/best",
             "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
             "noplaylist": True,
             "quiet": True,
-            "socket_timeout": 30,
-            "retries": 3,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
-                              "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                              "Version/17.5 Mobile/15E148 Safari/604.1",
-            },
         }
-        if COOKIES_AVAILABLE:
-            ydl_opts["cookiefile"] = COOKIES_FILE
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -366,63 +278,49 @@ def download_video(url):
                 title = info.get("title", "Անհայտ")
 
         for f in os.listdir(tmp_dir):
-            if f.endswith((".mp4", ".mov", ".webm", ".mkv", ".jpg", ".jpeg", ".png")):
+            if f.endswith((".mp4", ".mov", ".webm", ".mkv")):
                 return os.path.join(tmp_dir, f), tmp_dir, title
+
+        print("FILES IN TMP:", os.listdir(tmp_dir))
+        return None, tmp_dir, None
 
     except Exception as e:
         print("VIDEO DOWNLOAD ERROR:", e)
+        return None, tmp_dir, None
 
-    return None, tmp_dir, None
-
+# ─── ՆՈՐ: PHOTO DOWNLOAD (Instagram նկար / Pinterest) ───
 
 def download_photo(url):
-    """Instagram նկար / Pinterest — gallery-dl + yt-dlp fallback"""
+    """Ներբեռնում է նկար՝ yt-dlp-ի միջոցով (Instagram photo, Pinterest)"""
     tmp_dir = tempfile.mkdtemp()
     title = "Անհայտ"
 
-    # Նախ gallery-dl
-    file_path = download_with_gallery_dl(url, tmp_dir)
-    if file_path and os.path.exists(file_path):
-        title = os.path.splitext(os.path.basename(file_path))[0]
-        return file_path, tmp_dir, title
-
-    # Fallback — yt-dlp
     try:
         ydl_opts = {
             "format": "best",
             "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
             "noplaylist": True,
             "quiet": True,
-            "writethumbnail": True,
-            "socket_timeout": 30,
-            "retries": 3,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
-                              "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                              "Version/17.5 Mobile/15E148 Safari/604.1",
-            },
+            "writethumbnail": False,
         }
-        if COOKIES_AVAILABLE:
-            ydl_opts["cookiefile"] = COOKIES_FILE
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             if info:
                 title = info.get("title", "Անհայտ")
 
-        files = os.listdir(tmp_dir)
-        print("FILES IN TMP:", files)
-        for f in files:
-            if f.endswith((".mp4", ".mov", ".webm", ".mkv")):
+        # Փնտրում ենք բոլոր հնարավոր ֆայլերը
+        for f in os.listdir(tmp_dir):
+            if f.endswith((".jpg", ".jpeg", ".png", ".webp",
+                           ".mp4", ".mov", ".webm", ".mkv")):
                 return os.path.join(tmp_dir, f), tmp_dir, title
-        for f in files:
-            if f.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                return os.path.join(tmp_dir, f), tmp_dir, title
+
+        print("FILES IN TMP:", os.listdir(tmp_dir))
+        return None, tmp_dir, None
 
     except Exception as e:
         print("PHOTO DOWNLOAD ERROR:", e)
-
-    return None, tmp_dir, None
+        return None, tmp_dir, None
 
 
 def cleanup(tmp_dir):
