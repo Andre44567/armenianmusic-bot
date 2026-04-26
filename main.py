@@ -61,6 +61,7 @@ INSTAGRAM_REGEX = re.compile(
 )
 PINTEREST_REGEX = re.compile(
     r'(https?://)?(www\.|[a-z]{2}\.)?pinterest\.(com|co\.[a-z]+)/pin/[\w\-]+'
+    r'|(https?://)?pin\.it/[\w]+'
 )
 
 def has_ffmpeg():
@@ -73,7 +74,7 @@ def has_ffmpeg():
 FFMPEG_AVAILABLE = has_ffmpeg()
 print(f"ffmpeg: {'✅ կա' if FFMPEG_AVAILABLE else '❌ չկա'}")
 
-WELCOME_IMAGE_URL = "https://husky-green-dbrtsvmxad.edgeone.app/IMG_20260426_175620_324.jpg ճիշտաՄ"
+WELCOME_IMAGE_URL = "https://husky-green-dbrtsvmxad.edgeone.app/IMG_20260426_175620_324.jpg"
 
 # ─────────────────────────────
 # START / HELP
@@ -465,4 +466,3 @@ def unknown(message):
 # ─────────────────────────────
 print("✅ BOT RUNNING...")
 bot.polling(none_stop=True)
-
