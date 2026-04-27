@@ -327,55 +327,49 @@ def download_audio(query_or_url):
     is_url = bool(YOUTUBE_REGEX.match(query_or_url.strip()))
     source = query_or_url.strip() if is_url else f"ytsearch1:{query_or_url}"
     title = "Անհայտ"
-    last_error = None
 
-    format_attempts = [
-        "140",                 # m4a 128k — YouTube native, ffmpeg պետք չէ
-        "bestaudio[ext=m4a]",  # ցանկացած m4a
-        "bestaudio[ext=webm]", # webm audio
-        "bestaudio[ext=opus]", # opus
-        "bestaudio",           # ինչ կա լավագույնը
-        "18",                  # mp4 360p (audio կա ներսում)
-        "best[height<=360]",   # ցածր video fallback
-    ]
-
-    for fmt in format_attempts:
-        try:
+    try:
+        if FFMPEG_AVAILABLE:
             ydl_opts = {
-                "format": fmt,
+                "format": "bestaudio/best",
                 "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
                 "noplaylist": True,
-                "quiet": False,
-                "no_warnings": False,
+                "quiet": True,
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "128",
+                }],
+                **get_cookies_opts(),
+            }
+        else:
+            ydl_opts = {
+                "format": "140/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+                "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
+                "noplaylist": True,
+                "quiet": True,
                 **get_cookies_opts(),
             }
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(source, download=True)
-                if info:
-                    if "entries" in info and info["entries"]:
-                        title = info["entries"][0].get("title", "Անհայտ")
-                    else:
-                        title = info.get("title", "Անհայտ")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(source, download=True)
+            if info:
+                if "entries" in info and info["entries"]:
+                    title = info["entries"][0].get("title", "Անհայտ")
+                else:
+                    title = info.get("title", "Անհայտ")
 
-            for f in os.listdir(tmp_dir):
-                fp = os.path.join(tmp_dir, f)
-                if os.path.getsize(fp) > 1000:
-                    print(f"✅ Ներբեռնվեց format={fmt}: {f}")
-                    return fp, tmp_dir, title, None
+        for f in os.listdir(tmp_dir):
+            if f.endswith((".mp3", ".m4a", ".webm", ".ogg", ".opus")):
+                return os.path.join(tmp_dir, f), tmp_dir, title
 
-        except Exception as e:
-            last_error = str(e)
-            print(f"⚠️ format={fmt} ձախողվեց: {e}")
-            for f in os.listdir(tmp_dir):
-                try:
-                    os.remove(os.path.join(tmp_dir, f))
-                except:
-                    pass
-            continue
+        print("FILES IN TMP:", os.listdir(tmp_dir))
+        return None, tmp_dir, None
 
-    print("❌ Բոլոր ֆորմատները ձախողվեցին. last_error:", last_error)
-    return None, tmp_dir, None, last_error
+    except Exception as e:
+        print("DOWNLOAD ERROR:", e)
+        return None, tmp_dir, None
+
 
 # ─────────────────────────────
 # YOUTUBE — Video Download (yt-dlp)
@@ -385,14 +379,13 @@ def download_youtube_video(url):
     """YouTube վիդեո ներբեռնում mp4 ֆորմատով"""
     tmp_dir = tempfile.mkdtemp()
     title = "Անհայտ"
-    last_error = None
 
     try:
         ydl_opts = {
-            "format": "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio/best",
+            "format": "best[ext=mp4]/best",
             "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
             "noplaylist": True,
-            "quiet": False,
+            "quiet": True,
             **get_cookies_opts(),
         }
 
@@ -402,17 +395,15 @@ def download_youtube_video(url):
                 title = info.get("title", "Անհայտ")
 
         for f in os.listdir(tmp_dir):
-            fp = os.path.join(tmp_dir, f)
-            if f.endswith((".mp4", ".mov", ".webm", ".mkv")) and os.path.getsize(fp) > 1000:
-                return os.path.join(tmp_dir, f), tmp_dir, title, None
+            if f.endswith((".mp4", ".mov", ".webm", ".mkv")):
+                return os.path.join(tmp_dir, f), tmp_dir, title
 
         print("FILES IN TMP:", os.listdir(tmp_dir))
-        return None, tmp_dir, None, "Ֆայլ չստեղծվեց"
+        return None, tmp_dir, None
 
     except Exception as e:
-        last_error = str(e)
         print("YOUTUBE VIDEO ERROR:", e)
-        return None, tmp_dir, None, last_error
+        return None, tmp_dir, None
 
 
 # ─────────────────────────────
@@ -476,15 +467,14 @@ def download(message):
     query = parts[1]
     msg = bot.send_message(message.chat.id, "⏳ Ներբեռնում եմ...")
 
-    file_path, tmp_dir, title, last_error = download_audio(query)
+    file_path, tmp_dir, title = download_audio(query)
 
     if file_path and os.path.exists(file_path):
         bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
         send_audio_file(message.chat.id, file_path, title, msg.message_id)
     else:
-        err_txt = f"\n⚠️ {last_error[:200]}" if last_error else ""
         bot.edit_message_text(
-            f"❌ Չստացվեց ներբեռնել{err_txt}\n💡 Թարմացրու cookies.txt",
+            "❌ Չստացվեց ներբեռնել\n💡 Փորձիր /update և կրկնիր",
             message.chat.id, msg.message_id
         )
 
@@ -500,65 +490,46 @@ def handle_youtube_url(message):
     users.add(message.from_user.id)
     url = YOUTUBE_REGEX.search(message.text).group(0)
 
-    # Inline keyboard — Audio կամ Video
+    # Ընտրություն — Audio կամ Video
     markup = telebot.types.InlineKeyboardMarkup()
-    # URL-ը կարճացնել callback_data-ի 64 byte սահմանի համար
-    # Պահել URL-ը message-ի reply-ում, callback-ը ստանում է message id
     markup.row(
-        telebot.types.InlineKeyboardButton("🎵 Audio", callback_data=f"yta|{message.message_id}"),
-        telebot.types.InlineKeyboardButton("🎬 Video", callback_data=f"ytv|{message.message_id}"),
+        telebot.types.InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"yt_audio|{url}"),
+        telebot.types.InlineKeyboardButton("🎬 Video (MP4)", callback_data=f"yt_video|{url}"),
     )
-    sent = bot.send_message(
+    bot.send_message(
         message.chat.id,
-        "🔗 YouTube հղում — Ի՞նչ ներբեռնել?\n" + url,
+        "🔗 YouTube հղում — Ի՞նչ ներբեռնել?",
         reply_markup=markup
     )
-    # Պահել URL-ը bot data-ում
-    if not hasattr(bot, "_yt_urls"):
-        bot._yt_urls = {}
-    bot._yt_urls[message.message_id] = url
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("yta|") or call.data.startswith("ytv|"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("yt_audio|") or call.data.startswith("yt_video|"))
 def youtube_callback(call):
     bot.answer_callback_query(call.id)
-
-    if "|" not in call.data:
-        bot.send_message(call.message.chat.id, "❌ Սխալ հղում")
-        return
-
     action, url = call.data.split("|", 1)
 
-    if action == "yta":
-        msg = bot.send_message(call.message.chat.id, "🎵 Audio ներբեռնում եմ...\n⏳ 10-30 վայրկյան")
-        file_path, tmp_dir, title, last_error = download_audio(url)
+    if action == "yt_audio":
+        msg = bot.send_message(call.message.chat.id, "🎵 Audio ներբեռնում եմ...")
+        file_path, tmp_dir, title = download_audio(url)
         if file_path and os.path.exists(file_path):
-            try:
-                bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", call.message.chat.id, msg.message_id)
-            except:
-                pass
+            bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", call.message.chat.id, msg.message_id)
             send_audio_file(call.message.chat.id, file_path, title, msg.message_id)
         else:
-            err_txt = f"\n⚠️ {last_error[:200]}" if last_error else ""
             bot.edit_message_text(
-                f"❌ Չստացվեց{err_txt}\n💡 Թարմացրու cookies.txt",
+                "❌ Չստացվեց ներբեռնել\n💡 Փորձիր /update",
                 call.message.chat.id, msg.message_id
             )
         cleanup(tmp_dir)
 
-    elif action == "ytv":
-        msg = bot.send_message(call.message.chat.id, "🎬 Video ներբեռնում եմ...\n⏳ 30-60 վայրկյան")
-        file_path, tmp_dir, title, last_error = download_youtube_video(url)
+    elif action == "yt_video":
+        msg = bot.send_message(call.message.chat.id, "🎬 Video ներբեռնում եմ...")
+        file_path, tmp_dir, title = download_youtube_video(url)
         if file_path and os.path.exists(file_path):
-            try:
-                bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", call.message.chat.id, msg.message_id)
-            except:
-                pass
+            bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", call.message.chat.id, msg.message_id)
             send_video_file(call.message.chat.id, file_path, title, msg.message_id, "🎬 YouTube")
         else:
-            err_txt = f"\n⚠️ {last_error[:200]}" if last_error else ""
             bot.edit_message_text(
-                f"❌ Չստացվեց{err_txt}\n💡 Թարմացրու cookies.txt",
+                "❌ Չստացվեց ներբեռնել\n💡 Փորձիր /update",
                 call.message.chat.id, msg.message_id
             )
         cleanup(tmp_dir)
