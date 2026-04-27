@@ -3,6 +3,7 @@ import tempfile
 import re
 import subprocess
 import sys
+import shutil
 
 import telebot
 import yt_dlp
@@ -24,6 +25,20 @@ def update_yt_dlp():
 update_yt_dlp()
 
 # ─────────────────────────────
+# COOKIES FILE — YouTube
+# ─────────────────────────────
+
+# cookies.txt ֆայլը պետք է լինի bot.py-ի կողքին
+COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+
+def get_cookies_opts():
+    """Վերադարձնում է cookiefile օպցիան, եթե ֆայլը գոյություն ունի"""
+    if os.path.exists(COOKIES_FILE):
+        return {"cookiefile": COOKIES_FILE}
+    print("⚠️ cookies.txt չկա — YouTube-ը կարող է սահմանափակել")
+    return {}
+
+# ─────────────────────────────
 # CONFIG
 # ─────────────────────────────
 
@@ -31,11 +46,11 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("❌ TELEGRAM_BOT_TOKEN չկա")
 
-ADMIN_ID = 7304274135  # ← Քո Telegram ID-ն դիր այստեղ (@userinfobot-ից ստացիր)
+ADMIN_ID = 7304274135  # ← Քո Telegram ID-ն
 
 bot = telebot.TeleBot(TOKEN)
 playlists = {}
-users = set()  # Բոլոր օգտատերերի ID-ները
+users = set()
 
 YOUTUBE_REGEX = re.compile(
     r'(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)[\w\-]+'
@@ -49,12 +64,10 @@ INSTAGRAM_REGEX = re.compile(
     r'(https?://)?(www\.)?instagram\.com/(p|reel|tv)/[\w\-]+'
 )
 
-# ─── ՆՈՐ: Pinterest regex ───
 PINTEREST_REGEX = re.compile(
     r'(https?://)?(www\.|[a-z]{2}\.)?pinterest\.(com|co\.[a-z]+)/pin/[\w\-]+'
 )
 
-# ─── ՆՈՐ: Instagram նկարի regex (միայն /p/ — ոչ reel/tv) ───
 INSTAGRAM_PHOTO_REGEX = re.compile(
     r'(https?://)?(www\.)?instagram\.com/p/[\w\-]+'
 )
@@ -68,12 +81,13 @@ def has_ffmpeg():
 
 FFMPEG_AVAILABLE = has_ffmpeg()
 print(f"ffmpeg: {'✅ կա' if FFMPEG_AVAILABLE else '❌ չկա'}")
+print(f"cookies.txt: {'✅ կա' if os.path.exists(COOKIES_FILE) else '❌ չկա'}")
 
 # ─────────────────────────────
-# START / HELP  ← ՆՈՐ: ուղարկում է նկար
+# START / HELP
 # ─────────────────────────────
 
-WELCOME_IMAGE_URL = "https://i.imgur.com/4M34hi2.png"  # ← Փոխիր քո ուզած նկարի URL-ով
+WELCOME_IMAGE_URL = "https://i.imgur.com/4M34hi2.png"
 
 @bot.message_handler(commands=['start', 'help'])
 def start(message):
@@ -94,13 +108,8 @@ def start(message):
     )
 
     try:
-        bot.send_photo(
-            message.chat.id,
-            photo=WELCOME_IMAGE_URL,
-            caption=welcome_text
-        )
+        bot.send_photo(message.chat.id, photo=WELCOME_IMAGE_URL, caption=welcome_text)
     except Exception:
-        # Եթե նկարը չբեռնվի — ուղարկիր սովորական տեքստ
         bot.send_message(message.chat.id, welcome_text)
 
 # ─────────────────────────────
@@ -119,10 +128,12 @@ def update_command(message):
         global FFMPEG_AVAILABLE
         FFMPEG_AVAILABLE = has_ffmpeg()
         version = yt_dlp.version.__version__
+        cookies_status = "✅ կա" if os.path.exists(COOKIES_FILE) else "❌ չկա"
         bot.edit_message_text(
             f"✅ yt-dlp թարմացվեց\n"
             f"📦 Տարբերակ: {version}\n"
-            f"🔧 ffmpeg: {'✅ կա' if FFMPEG_AVAILABLE else '❌ չկա'}",
+            f"🔧 ffmpeg: {'✅ կա' if FFMPEG_AVAILABLE else '❌ չկա'}\n"
+            f"🍪 cookies.txt: {cookies_status}",
             message.chat.id, msg.message_id
         )
     except Exception as e:
@@ -183,6 +194,7 @@ def search(message):
             "quiet": True,
             "noplaylist": True,
             "skip_download": True,
+            **get_cookies_opts(),  # ← cookies YouTube-ի համար
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"ytsearch1:{query}", download=False)
@@ -228,6 +240,7 @@ def download_audio(query_or_url):
                     "preferredcodec": "mp3",
                     "preferredquality": "128",
                 }],
+                **get_cookies_opts(),  # ← cookies YouTube-ի համար
             }
         else:
             ydl_opts = {
@@ -235,6 +248,7 @@ def download_audio(query_or_url):
                 "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
                 "noplaylist": True,
                 "quiet": True,
+                **get_cookies_opts(),  # ← cookies YouTube-ի համար
             }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -257,7 +271,7 @@ def download_audio(query_or_url):
         return None, tmp_dir, None
 
 # ─────────────────────────────
-# VIDEO DOWNLOAD (TikTok / Instagram)
+# VIDEO DOWNLOAD (TikTok)
 # ─────────────────────────────
 
 def download_video(url):
@@ -288,46 +302,249 @@ def download_video(url):
         print("VIDEO DOWNLOAD ERROR:", e)
         return None, tmp_dir, None
 
-# ─── ՆՈՐ: PHOTO DOWNLOAD (Instagram նկար / Pinterest) ───
+# ─────────────────────────────
+# INSTAGRAM VIDEO DOWNLOAD — yt-dlp + requests fallback
+# ─────────────────────────────
 
-def download_photo(url):
-    """Ներբեռնում է նկար՝ yt-dlp-ի միջոցով (Instagram photo, Pinterest)"""
+def download_instagram_video(url):
+    """Instagram reel/tv ներբեռնում"""
     tmp_dir = tempfile.mkdtemp()
-    title = "Անհայտ"
+    title = "Instagram"
 
+    # Մեթոդ 1 — yt-dlp առանց cookies
     try:
         ydl_opts = {
-            "format": "best",
+            "format": "best[ext=mp4]/best",
             "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
             "noplaylist": True,
             "quiet": True,
-            "writethumbnail": False,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                    "Version/16.0 Mobile/15E148 Safari/604.1"
+                ),
+            },
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             if info:
-                title = info.get("title", "Անհայտ")
+                title = info.get("title", "Instagram")
 
-        # Փնտրում ենք բոլոր հնարավոր ֆայլերը
+        for f in os.listdir(tmp_dir):
+            if f.endswith((".mp4", ".mov", ".webm", ".mkv")):
+                return os.path.join(tmp_dir, f), tmp_dir, title
+
+    except Exception as e:
+        print("INSTAGRAM VIDEO yt-dlp ERROR:", e)
+
+    # Մեթոդ 2 — yt-dlp + instagram-dl extractor
+    try:
+        ydl_opts2 = {
+            "format": "best",
+            "outtmpl": f"{tmp_dir}/ig_%(id)s.%(ext)s",
+            "noplaylist": True,
+            "quiet": True,
+            "extractor_args": {"instagram": {"api": ["graphql"]}},
+        }
+        with yt_dlp.YoutubeDL(ydl_opts2) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info:
+                title = info.get("title", "Instagram")
+
+        for f in os.listdir(tmp_dir):
+            if f.endswith((".mp4", ".mov", ".webm", ".mkv", ".jpg", ".jpeg", ".png")):
+                return os.path.join(tmp_dir, f), tmp_dir, title
+
+    except Exception as e:
+        print("INSTAGRAM VIDEO fallback ERROR:", e)
+
+    return None, tmp_dir, None
+
+# ─────────────────────────────
+# INSTAGRAM PHOTO DOWNLOAD — requests + BeautifulSoup
+# ─────────────────────────────
+
+def download_instagram_photo(url):
+    """
+    Instagram /p/ նկար ներբեռնում։
+    Փորձում է yt-dlp-ով, հետո requests-ով og:image մետա թեգից։
+    """
+    tmp_dir = tempfile.mkdtemp()
+    title = "Instagram"
+
+    # Մեթոդ 1 — yt-dlp
+    try:
+        ydl_opts = {
+            "format": "best",
+            "outtmpl": f"{tmp_dir}/ig_%(id)s.%(ext)s",
+            "noplaylist": True,
+            "quiet": True,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                    "Version/16.0 Mobile/15E148 Safari/604.1"
+                ),
+            },
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info:
+                title = info.get("title", "Instagram")
+
+        for f in os.listdir(tmp_dir):
+            if f.endswith((".jpg", ".jpeg", ".png", ".webp",
+                           ".mp4", ".mov", ".webm")):
+                return os.path.join(tmp_dir, f), tmp_dir, title
+
+    except Exception as e:
+        print("INSTAGRAM PHOTO yt-dlp ERROR:", e)
+
+    # Մեթոդ 2 — requests-ով og:image scraping
+    try:
+        import requests
+        from html.parser import HTMLParser
+
+        class OGImageParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.image_url = None
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "meta":
+                    attrs_dict = dict(attrs)
+                    if attrs_dict.get("property") == "og:image":
+                        self.image_url = attrs_dict.get("content")
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/16.0 Mobile/15E148 Safari/604.1"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        resp = requests.get(url, headers=headers, timeout=15)
+        parser = OGImageParser()
+        parser.feed(resp.text)
+
+        if parser.image_url:
+            img_resp = requests.get(parser.image_url, headers=headers, timeout=15)
+            img_path = os.path.join(tmp_dir, "instagram_photo.jpg")
+            with open(img_path, "wb") as f:
+                f.write(img_resp.content)
+            print("✅ Instagram og:image ստացվեց")
+            return img_path, tmp_dir, title
+
+    except Exception as e:
+        print("INSTAGRAM PHOTO og:image ERROR:", e)
+
+    return None, tmp_dir, None
+
+# ─────────────────────────────
+# PINTEREST DOWNLOAD — yt-dlp + requests fallback
+# ─────────────────────────────
+
+def download_pinterest(url):
+    """
+    Pinterest pin ներբեռնում (նկար կամ վիդեո)։
+    Փորձում է yt-dlp-ով, հետո requests-ով og:image-ից։
+    """
+    tmp_dir = tempfile.mkdtemp()
+    title = "Pinterest"
+
+    # Մեթոդ 1 — yt-dlp
+    try:
+        ydl_opts = {
+            "format": "best",
+            "outtmpl": f"{tmp_dir}/pin_%(id)s.%(ext)s",
+            "noplaylist": True,
+            "quiet": True,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            },
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info:
+                title = info.get("title", "Pinterest")
+
         for f in os.listdir(tmp_dir):
             if f.endswith((".jpg", ".jpeg", ".png", ".webp",
                            ".mp4", ".mov", ".webm", ".mkv")):
                 return os.path.join(tmp_dir, f), tmp_dir, title
 
-        print("FILES IN TMP:", os.listdir(tmp_dir))
-        return None, tmp_dir, None
+    except Exception as e:
+        print("PINTEREST yt-dlp ERROR:", e)
+
+    # Մեթոդ 2 — requests-ով og:image scraping
+    try:
+        import requests
+        from html.parser import HTMLParser
+
+        class OGImageParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.image_url = None
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "meta":
+                    attrs_dict = dict(attrs)
+                    prop = attrs_dict.get("property", "") or attrs_dict.get("name", "")
+                    if prop in ("og:image", "twitter:image:src", "og:video"):
+                        if not self.image_url:
+                            self.image_url = attrs_dict.get("content")
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        resp = requests.get(url, headers=headers, timeout=15)
+        parser = OGImageParser()
+        parser.feed(resp.text)
+
+        if parser.image_url:
+            img_resp = requests.get(parser.image_url, headers=headers, timeout=15)
+            # Ստուգում ֆայլի տեսակը
+            content_type = img_resp.headers.get("content-type", "")
+            ext = ".jpg"
+            if "png" in content_type:
+                ext = ".png"
+            elif "webp" in content_type:
+                ext = ".webp"
+            elif "mp4" in content_type or "video" in content_type:
+                ext = ".mp4"
+
+            img_path = os.path.join(tmp_dir, f"pinterest_media{ext}")
+            with open(img_path, "wb") as f:
+                f.write(img_resp.content)
+            print("✅ Pinterest og:image ստացվեց")
+            return img_path, tmp_dir, title
 
     except Exception as e:
-        print("PHOTO DOWNLOAD ERROR:", e)
-        return None, tmp_dir, None
+        print("PINTEREST og:image ERROR:", e)
 
+    return None, tmp_dir, None
+
+# ─────────────────────────────
+# UTILS
+# ─────────────────────────────
 
 def cleanup(tmp_dir):
     try:
-        for f in os.listdir(tmp_dir):
-            os.remove(os.path.join(tmp_dir, f))
-        os.rmdir(tmp_dir)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     except:
         pass
 
@@ -349,8 +566,6 @@ def send_video_file(chat_id, file_path, title, msg_id, platform=""):
     except:
         pass
 
-
-# ─── ՆՈՐ: send_media_file — ուղարկում է նկար կամ վիդեո ───
 
 def send_media_file(chat_id, file_path, title, msg_id, platform=""):
     """Ինքնաբերաբար ճանաչում է ֆայլի տեսակը և ուղարկում"""
@@ -443,7 +658,7 @@ def handle_tiktok_url(message):
     cleanup(tmp_dir)
 
 # ─────────────────────────────
-# INSTAGRAM URL  ← ՆՈՐ ՏՐԱՄԱԲԱՆՈՒԹՅՈՒՆ
+# INSTAGRAM URL
 # /p/ → նկար;  /reel/ կամ /tv/ → վիդեո
 # ─────────────────────────────
 
@@ -452,27 +667,27 @@ def handle_instagram_url(message):
     users.add(message.from_user.id)
     url = INSTAGRAM_REGEX.search(message.text).group(0)
 
-    # Ստուգում՝ նկա՞ր, թե՞ վիդեո
     is_photo = bool(INSTAGRAM_PHOTO_REGEX.match(url))
 
     if is_photo:
         msg = bot.send_message(message.chat.id, "📸 Instagram նկար, ներբեռնում եմ...")
-        file_path, tmp_dir, title = download_photo(url)
+        file_path, tmp_dir, title = download_instagram_photo(url)
         if file_path and os.path.exists(file_path):
             bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
             send_media_file(message.chat.id, file_path, title, msg.message_id, "📸 Instagram")
         else:
             bot.edit_message_text(
-                "❌ Չստացվեց ներբեռնել\n💡 Instagram-ը կարող է փակ լինել",
+                "❌ Չստացվեց ներբեռնել\n"
+                "💡 Instagram-ը կարող է փակ լինել կամ հղումը սխալ է",
                 message.chat.id, msg.message_id
             )
         cleanup(tmp_dir)
     else:
-        msg = bot.send_message(message.chat.id, "📸 Instagram հղում, ներբեռնում եմ...")
-        file_path, tmp_dir, title = download_video(url)
+        msg = bot.send_message(message.chat.id, "📸 Instagram Reel, ներբեռնում եմ...")
+        file_path, tmp_dir, title = download_instagram_video(url)
         if file_path and os.path.exists(file_path):
             bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
-            send_video_file(message.chat.id, file_path, title, msg.message_id, "📸 Instagram")
+            send_media_file(message.chat.id, file_path, title, msg.message_id, "📸 Instagram")
         else:
             bot.edit_message_text(
                 "❌ Չստացվեց ներբեռնել\n💡 Փորձիր /update և կրկնիր",
@@ -481,7 +696,7 @@ def handle_instagram_url(message):
         cleanup(tmp_dir)
 
 # ─────────────────────────────
-# ՆՈՐ: PINTEREST URL
+# PINTEREST URL
 # ─────────────────────────────
 
 @bot.message_handler(func=lambda m: bool(PINTEREST_REGEX.search(m.text or "")))
@@ -490,7 +705,7 @@ def handle_pinterest_url(message):
     url = PINTEREST_REGEX.search(message.text).group(0)
     msg = bot.send_message(message.chat.id, "📌 Pinterest հղում, ներբեռնում եմ...")
 
-    file_path, tmp_dir, title = download_photo(url)
+    file_path, tmp_dir, title = download_pinterest(url)
 
     if file_path and os.path.exists(file_path):
         bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
