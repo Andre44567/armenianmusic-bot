@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import shutil
+import requests
 
 import telebot
 import yt_dlp
@@ -28,11 +29,9 @@ update_yt_dlp()
 # COOKIES FILE — YouTube
 # ─────────────────────────────
 
-# cookies.txt ֆայլը պետք է լինի bot.py-ի կողքին
 COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
 
 def get_cookies_opts():
-    """Վերադարձնում է cookiefile օպցիան, եթե ֆայլը գոյություն ունի"""
     if os.path.exists(COOKIES_FILE):
         return {"cookiefile": COOKIES_FILE}
     print("⚠️ cookies.txt չկա — YouTube-ը կարող է սահմանափակել")
@@ -46,7 +45,18 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("❌ TELEGRAM_BOT_TOKEN չկա")
 
-ADMIN_ID = 7304274135  # ← Քո Telegram ID-ն
+ADMIN_ID = 7304274135
+
+# RapidAPI — Social Download All-in-One
+RAPIDAPI_KEY = "84c6910a82mshb9fff0a8c0c62f1p109a93jsn9ce6c2818c4c"
+RAPIDAPI_HOST = "social-download-all-in-one.p.rapidapi.com"
+RAPIDAPI_URL = "https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink"
+
+RAPIDAPI_HEADERS = {
+    "x-rapidapi-key": RAPIDAPI_KEY,
+    "x-rapidapi-host": RAPIDAPI_HOST,
+    "Content-Type": "application/json",
+}
 
 bot = telebot.TeleBot(TOKEN)
 playlists = {}
@@ -84,6 +94,98 @@ print(f"ffmpeg: {'✅ կա' if FFMPEG_AVAILABLE else '❌ չկա'}")
 print(f"cookies.txt: {'✅ կա' if os.path.exists(COOKIES_FILE) else '❌ չկա'}")
 
 # ─────────────────────────────
+# RAPIDAPI — Universal Social Downloader
+# TikTok, Instagram, Pinterest-ի համար
+# ─────────────────────────────
+
+def rapidapi_download(url):
+    """
+    RapidAPI Social Download All-in-One-ով ներբեռնում։
+    Վերադարձնում է (file_path, tmp_dir, title) կամ (None, tmp_dir, None)
+    """
+    tmp_dir = tempfile.mkdtemp()
+    title = "Media"
+
+    try:
+        resp = requests.post(
+            RAPIDAPI_URL,
+            headers=RAPIDAPI_HEADERS,
+            json={"url": url},
+            timeout=30,
+        )
+        data = resp.json()
+        print("RAPIDAPI RESPONSE:", data)
+
+        # title-ն
+        title = data.get("title") or data.get("desc") or "Media"
+
+        # Medias-ի ցուցակ
+        medias = data.get("medias") or []
+
+        if not medias:
+            print("⚠️ RapidAPI — medias դատարկ է")
+            return None, tmp_dir, None
+
+        # Ընտրել լավագույն մեդիան
+        # Նախ փնտրում ենք mp4 video, հետո audio, հետո image
+        chosen = None
+        for quality in ["hd", "sd", "audio", "thumbnail"]:
+            for m in medias:
+                if m.get("quality") == quality and m.get("url"):
+                    chosen = m
+                    break
+            if chosen:
+                break
+
+        # Եթե quality-ով չգտանք — առաջինն ենք վերցնում
+        if not chosen:
+            for m in medias:
+                if m.get("url"):
+                    chosen = m
+                    break
+
+        if not chosen:
+            print("⚠️ RapidAPI — ներբեռնելի URL չկա")
+            return None, tmp_dir, None
+
+        media_url = chosen["url"]
+        ext = chosen.get("extension") or chosen.get("ext") or "mp4"
+        if not ext.startswith("."):
+            ext = f".{ext}"
+
+        # Ներբեռնել ֆայլը
+        file_resp = requests.get(media_url, timeout=60, stream=True)
+        file_resp.raise_for_status()
+
+        # Ֆայլի ընդլայնումը content-type-ից
+        ct = file_resp.headers.get("content-type", "")
+        if "jpeg" in ct or "jpg" in ct:
+            ext = ".jpg"
+        elif "png" in ct:
+            ext = ".png"
+        elif "webp" in ct:
+            ext = ".webp"
+        elif "mp4" in ct or "video" in ct:
+            ext = ".mp4"
+        elif "audio" in ct or "mpeg" in ct:
+            ext = ".mp3"
+
+        safe_title = re.sub(r'[^\w\s-]', '', title)[:50].strip() or "media"
+        file_path = os.path.join(tmp_dir, f"{safe_title}{ext}")
+
+        with open(file_path, "wb") as f:
+            for chunk in file_resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        print(f"✅ RapidAPI ներբեռնեց՝ {file_path}")
+        return file_path, tmp_dir, title
+
+    except Exception as e:
+        print("RAPIDAPI ERROR:", e)
+        return None, tmp_dir, None
+
+
+# ─────────────────────────────
 # START / HELP
 # ─────────────────────────────
 
@@ -97,7 +199,7 @@ def start(message):
         "🎵 Բարի գալուստ Khachatryans Երգի Բոտ!\n\n"
         "🔍 /search երգի անուն — Որոնել\n"
         "🎧 /download երգի անուն — Ներբեռնել\n"
-        "🔗 YouTube հղում — Ուղղակի ներբեռնել\n"
+        "🔗 YouTube հղում — Audio ներբեռնել\n"
         "🎵 TikTok հղում — Վիդեո ներբեռնել\n"
         "📸 Instagram հղում — Վիդեո/նկար ներբեռնել\n"
         "📌 Pinterest հղում — Նկար/վիդեո ներբեռնել\n"
@@ -140,7 +242,7 @@ def update_command(message):
         bot.edit_message_text(f"❌ Ձախողվեց\n{e}", message.chat.id, msg.message_id)
 
 # ─────────────────────────────
-# BROADCAST — միայն ադմինի համար
+# BROADCAST
 # ─────────────────────────────
 
 @bot.message_handler(commands=['broadcast'])
@@ -158,7 +260,6 @@ def broadcast(message):
     text = parts[1]
     success = 0
     failed = 0
-
     msg = bot.send_message(message.chat.id, f"📤 Ուղարկում եմ {len(users)} հոգու...")
 
     for uid in users.copy():
@@ -169,8 +270,7 @@ def broadcast(message):
             failed += 1
 
     bot.edit_message_text(
-        f"✅ Ուղարկվեց {success} հոգու\n"
-        f"❌ Չստացվեց {failed} հոգու",
+        f"✅ Ուղարկվեց {success} հոգու\n❌ Չստացվեց {failed} հոգու",
         message.chat.id, msg.message_id
     )
 
@@ -194,7 +294,7 @@ def search(message):
             "quiet": True,
             "noplaylist": True,
             "skip_download": True,
-            **get_cookies_opts(),  # ← cookies YouTube-ի համար
+            **get_cookies_opts(),
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f"ytsearch1:{query}", download=False)
@@ -219,7 +319,7 @@ def search(message):
         bot.send_message(message.chat.id, f"❌ Չգտնվեց\n⚠️ {str(e)[:150]}")
 
 # ─────────────────────────────
-# DOWNLOAD CORE (Audio — YouTube)
+# YOUTUBE — Audio Download (yt-dlp)
 # ─────────────────────────────
 
 def download_audio(query_or_url):
@@ -240,7 +340,7 @@ def download_audio(query_or_url):
                     "preferredcodec": "mp3",
                     "preferredquality": "128",
                 }],
-                **get_cookies_opts(),  # ← cookies YouTube-ի համար
+                **get_cookies_opts(),
             }
         else:
             ydl_opts = {
@@ -248,7 +348,7 @@ def download_audio(query_or_url):
                 "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
                 "noplaylist": True,
                 "quiet": True,
-                **get_cookies_opts(),  # ← cookies YouTube-ի համար
+                **get_cookies_opts(),
             }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -270,11 +370,13 @@ def download_audio(query_or_url):
         print("DOWNLOAD ERROR:", e)
         return None, tmp_dir, None
 
+
 # ─────────────────────────────
-# VIDEO DOWNLOAD (TikTok)
+# YOUTUBE — Video Download (yt-dlp)
 # ─────────────────────────────
 
-def download_video(url):
+def download_youtube_video(url):
+    """YouTube վիդեո ներբեռնում mp4 ֆորմատով"""
     tmp_dir = tempfile.mkdtemp()
     title = "Անհայտ"
 
@@ -284,6 +386,7 @@ def download_video(url):
             "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
             "noplaylist": True,
             "quiet": True,
+            **get_cookies_opts(),
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -299,244 +402,9 @@ def download_video(url):
         return None, tmp_dir, None
 
     except Exception as e:
-        print("VIDEO DOWNLOAD ERROR:", e)
+        print("YOUTUBE VIDEO ERROR:", e)
         return None, tmp_dir, None
 
-# ─────────────────────────────
-# INSTAGRAM VIDEO DOWNLOAD — yt-dlp + requests fallback
-# ─────────────────────────────
-
-def download_instagram_video(url):
-    """Instagram reel/tv ներբեռնում"""
-    tmp_dir = tempfile.mkdtemp()
-    title = "Instagram"
-
-    # Մեթոդ 1 — yt-dlp առանց cookies
-    try:
-        ydl_opts = {
-            "format": "best[ext=mp4]/best",
-            "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
-            "noplaylist": True,
-            "quiet": True,
-            "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                    "Version/16.0 Mobile/15E148 Safari/604.1"
-                ),
-            },
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info:
-                title = info.get("title", "Instagram")
-
-        for f in os.listdir(tmp_dir):
-            if f.endswith((".mp4", ".mov", ".webm", ".mkv")):
-                return os.path.join(tmp_dir, f), tmp_dir, title
-
-    except Exception as e:
-        print("INSTAGRAM VIDEO yt-dlp ERROR:", e)
-
-    # Մեթոդ 2 — yt-dlp + instagram-dl extractor
-    try:
-        ydl_opts2 = {
-            "format": "best",
-            "outtmpl": f"{tmp_dir}/ig_%(id)s.%(ext)s",
-            "noplaylist": True,
-            "quiet": True,
-            "extractor_args": {"instagram": {"api": ["graphql"]}},
-        }
-        with yt_dlp.YoutubeDL(ydl_opts2) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info:
-                title = info.get("title", "Instagram")
-
-        for f in os.listdir(tmp_dir):
-            if f.endswith((".mp4", ".mov", ".webm", ".mkv", ".jpg", ".jpeg", ".png")):
-                return os.path.join(tmp_dir, f), tmp_dir, title
-
-    except Exception as e:
-        print("INSTAGRAM VIDEO fallback ERROR:", e)
-
-    return None, tmp_dir, None
-
-# ─────────────────────────────
-# INSTAGRAM PHOTO DOWNLOAD — requests + BeautifulSoup
-# ─────────────────────────────
-
-def download_instagram_photo(url):
-    """
-    Instagram /p/ նկար ներբեռնում։
-    Փորձում է yt-dlp-ով, հետո requests-ով og:image մետա թեգից։
-    """
-    tmp_dir = tempfile.mkdtemp()
-    title = "Instagram"
-
-    # Մեթոդ 1 — yt-dlp
-    try:
-        ydl_opts = {
-            "format": "best",
-            "outtmpl": f"{tmp_dir}/ig_%(id)s.%(ext)s",
-            "noplaylist": True,
-            "quiet": True,
-            "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                    "Version/16.0 Mobile/15E148 Safari/604.1"
-                ),
-            },
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info:
-                title = info.get("title", "Instagram")
-
-        for f in os.listdir(tmp_dir):
-            if f.endswith((".jpg", ".jpeg", ".png", ".webp",
-                           ".mp4", ".mov", ".webm")):
-                return os.path.join(tmp_dir, f), tmp_dir, title
-
-    except Exception as e:
-        print("INSTAGRAM PHOTO yt-dlp ERROR:", e)
-
-    # Մեթոդ 2 — requests-ով og:image scraping
-    try:
-        import requests
-        from html.parser import HTMLParser
-
-        class OGImageParser(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.image_url = None
-
-            def handle_starttag(self, tag, attrs):
-                if tag == "meta":
-                    attrs_dict = dict(attrs)
-                    if attrs_dict.get("property") == "og:image":
-                        self.image_url = attrs_dict.get("content")
-
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/16.0 Mobile/15E148 Safari/604.1"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
-        resp = requests.get(url, headers=headers, timeout=15)
-        parser = OGImageParser()
-        parser.feed(resp.text)
-
-        if parser.image_url:
-            img_resp = requests.get(parser.image_url, headers=headers, timeout=15)
-            img_path = os.path.join(tmp_dir, "instagram_photo.jpg")
-            with open(img_path, "wb") as f:
-                f.write(img_resp.content)
-            print("✅ Instagram og:image ստացվեց")
-            return img_path, tmp_dir, title
-
-    except Exception as e:
-        print("INSTAGRAM PHOTO og:image ERROR:", e)
-
-    return None, tmp_dir, None
-
-# ─────────────────────────────
-# PINTEREST DOWNLOAD — yt-dlp + requests fallback
-# ─────────────────────────────
-
-def download_pinterest(url):
-    """
-    Pinterest pin ներբեռնում (նկար կամ վիդեո)։
-    Փորձում է yt-dlp-ով, հետո requests-ով og:image-ից։
-    """
-    tmp_dir = tempfile.mkdtemp()
-    title = "Pinterest"
-
-    # Մեթոդ 1 — yt-dlp
-    try:
-        ydl_opts = {
-            "format": "best",
-            "outtmpl": f"{tmp_dir}/pin_%(id)s.%(ext)s",
-            "noplaylist": True,
-            "quiet": True,
-            "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-            },
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info:
-                title = info.get("title", "Pinterest")
-
-        for f in os.listdir(tmp_dir):
-            if f.endswith((".jpg", ".jpeg", ".png", ".webp",
-                           ".mp4", ".mov", ".webm", ".mkv")):
-                return os.path.join(tmp_dir, f), tmp_dir, title
-
-    except Exception as e:
-        print("PINTEREST yt-dlp ERROR:", e)
-
-    # Մեթոդ 2 — requests-ով og:image scraping
-    try:
-        import requests
-        from html.parser import HTMLParser
-
-        class OGImageParser(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.image_url = None
-
-            def handle_starttag(self, tag, attrs):
-                if tag == "meta":
-                    attrs_dict = dict(attrs)
-                    prop = attrs_dict.get("property", "") or attrs_dict.get("name", "")
-                    if prop in ("og:image", "twitter:image:src", "og:video"):
-                        if not self.image_url:
-                            self.image_url = attrs_dict.get("content")
-
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
-        resp = requests.get(url, headers=headers, timeout=15)
-        parser = OGImageParser()
-        parser.feed(resp.text)
-
-        if parser.image_url:
-            img_resp = requests.get(parser.image_url, headers=headers, timeout=15)
-            # Ստուգում ֆայլի տեսակը
-            content_type = img_resp.headers.get("content-type", "")
-            ext = ".jpg"
-            if "png" in content_type:
-                ext = ".png"
-            elif "webp" in content_type:
-                ext = ".webp"
-            elif "mp4" in content_type or "video" in content_type:
-                ext = ".mp4"
-
-            img_path = os.path.join(tmp_dir, f"pinterest_media{ext}")
-            with open(img_path, "wb") as f:
-                f.write(img_resp.content)
-            print("✅ Pinterest og:image ստացվեց")
-            return img_path, tmp_dir, title
-
-    except Exception as e:
-        print("PINTEREST og:image ERROR:", e)
-
-    return None, tmp_dir, None
 
 # ─────────────────────────────
 # UTILS
@@ -583,8 +451,9 @@ def send_media_file(chat_id, file_path, title, msg_id, platform=""):
     except Exception as e:
         print("SEND MEDIA ERROR:", e)
 
+
 # ─────────────────────────────
-# DOWNLOAD COMMAND
+# DOWNLOAD COMMAND (/download)
 # ─────────────────────────────
 
 @bot.message_handler(commands=['download'])
@@ -611,31 +480,63 @@ def download(message):
 
     cleanup(tmp_dir)
 
+
 # ─────────────────────────────
-# YOUTUBE URL
+# YOUTUBE URL — Audio + Video inline keyboard
 # ─────────────────────────────
 
 @bot.message_handler(func=lambda m: bool(YOUTUBE_REGEX.search(m.text or "")))
 def handle_youtube_url(message):
     users.add(message.from_user.id)
     url = YOUTUBE_REGEX.search(message.text).group(0)
-    msg = bot.send_message(message.chat.id, "🔗 YouTube հղում, ներբեռնում եմ...")
 
-    file_path, tmp_dir, title = download_audio(url)
+    # Ընտրություն — Audio կամ Video
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.row(
+        telebot.types.InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"yt_audio|{url}"),
+        telebot.types.InlineKeyboardButton("🎬 Video (MP4)", callback_data=f"yt_video|{url}"),
+    )
+    bot.send_message(
+        message.chat.id,
+        "🔗 YouTube հղում — Ի՞նչ ներբեռնել?",
+        reply_markup=markup
+    )
 
-    if file_path and os.path.exists(file_path):
-        bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
-        send_audio_file(message.chat.id, file_path, title, msg.message_id)
-    else:
-        bot.edit_message_text(
-            "❌ Չստացվեց ներբեռնել\n💡 Փորձիր /update և կրկնիր",
-            message.chat.id, msg.message_id
-        )
 
-    cleanup(tmp_dir)
+@bot.callback_query_handler(func=lambda call: call.data.startswith("yt_audio|") or call.data.startswith("yt_video|"))
+def youtube_callback(call):
+    bot.answer_callback_query(call.id)
+    action, url = call.data.split("|", 1)
+
+    if action == "yt_audio":
+        msg = bot.send_message(call.message.chat.id, "🎵 Audio ներբեռնում եմ...")
+        file_path, tmp_dir, title = download_audio(url)
+        if file_path and os.path.exists(file_path):
+            bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", call.message.chat.id, msg.message_id)
+            send_audio_file(call.message.chat.id, file_path, title, msg.message_id)
+        else:
+            bot.edit_message_text(
+                "❌ Չստացվեց ներբեռնել\n💡 Փորձիր /update",
+                call.message.chat.id, msg.message_id
+            )
+        cleanup(tmp_dir)
+
+    elif action == "yt_video":
+        msg = bot.send_message(call.message.chat.id, "🎬 Video ներբեռնում եմ...")
+        file_path, tmp_dir, title = download_youtube_video(url)
+        if file_path and os.path.exists(file_path):
+            bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", call.message.chat.id, msg.message_id)
+            send_video_file(call.message.chat.id, file_path, title, msg.message_id, "🎬 YouTube")
+        else:
+            bot.edit_message_text(
+                "❌ Չստացվեց ներբեռնել\n💡 Փորձիր /update",
+                call.message.chat.id, msg.message_id
+            )
+        cleanup(tmp_dir)
+
 
 # ─────────────────────────────
-# TIKTOK URL
+# TIKTOK URL — RapidAPI
 # ─────────────────────────────
 
 @bot.message_handler(func=lambda m: bool(TIKTOK_REGEX.search(m.text or "")))
@@ -644,11 +545,37 @@ def handle_tiktok_url(message):
     url = TIKTOK_REGEX.search(message.text).group(0)
     msg = bot.send_message(message.chat.id, "🎵 TikTok հղում, ներբեռնում եմ...")
 
-    file_path, tmp_dir, title = download_video(url)
+    # Փորձ 1 — RapidAPI
+    file_path, tmp_dir, title = rapidapi_download(url)
+
+    # Փորձ 2 — yt-dlp fallback
+    if not file_path or not os.path.exists(file_path):
+        print("TikTok RapidAPI failed, trying yt-dlp...")
+        cleanup(tmp_dir)
+        tmp_dir2 = tempfile.mkdtemp()
+        try:
+            ydl_opts = {
+                "format": "best[ext=mp4]/best",
+                "outtmpl": f"{tmp_dir2}/%(title)s.%(ext)s",
+                "noplaylist": True,
+                "quiet": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info:
+                    title = info.get("title", "TikTok")
+            for f in os.listdir(tmp_dir2):
+                if f.endswith((".mp4", ".mov", ".webm", ".mkv")):
+                    file_path = os.path.join(tmp_dir2, f)
+                    tmp_dir = tmp_dir2
+                    break
+        except Exception as e:
+            print("TikTok yt-dlp ERROR:", e)
+            tmp_dir = tmp_dir2
 
     if file_path and os.path.exists(file_path):
         bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
-        send_video_file(message.chat.id, file_path, title, msg.message_id, "🎵 TikTok")
+        send_media_file(message.chat.id, file_path, title, msg.message_id, "🎵 TikTok")
     else:
         bot.edit_message_text(
             "❌ Չստացվեց ներբեռնել\n💡 Փորձիր /update և կրկնիր",
@@ -657,8 +584,9 @@ def handle_tiktok_url(message):
 
     cleanup(tmp_dir)
 
+
 # ─────────────────────────────
-# INSTAGRAM URL
+# INSTAGRAM URL — RapidAPI
 # /p/ → նկար;  /reel/ կամ /tv/ → վիդեո
 # ─────────────────────────────
 
@@ -666,37 +594,61 @@ def handle_tiktok_url(message):
 def handle_instagram_url(message):
     users.add(message.from_user.id)
     url = INSTAGRAM_REGEX.search(message.text).group(0)
-
     is_photo = bool(INSTAGRAM_PHOTO_REGEX.match(url))
 
-    if is_photo:
-        msg = bot.send_message(message.chat.id, "📸 Instagram նկար, ներբեռնում եմ...")
-        file_path, tmp_dir, title = download_instagram_photo(url)
-        if file_path and os.path.exists(file_path):
-            bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
-            send_media_file(message.chat.id, file_path, title, msg.message_id, "📸 Instagram")
-        else:
-            bot.edit_message_text(
-                "❌ Չստացվեց ներբեռնել\n"
-                "💡 Instagram-ը կարող է փակ լինել կամ հղումը սխալ է",
-                message.chat.id, msg.message_id
-            )
+    emoji = "📸 Instagram նկար" if is_photo else "📸 Instagram Reel"
+    msg = bot.send_message(message.chat.id, f"{emoji}, ներբեռնում եմ...")
+
+    # Փորձ 1 — RapidAPI
+    file_path, tmp_dir, title = rapidapi_download(url)
+
+    # Փորձ 2 — yt-dlp fallback
+    if not file_path or not os.path.exists(file_path):
+        print("Instagram RapidAPI failed, trying yt-dlp...")
         cleanup(tmp_dir)
+        tmp_dir2 = tempfile.mkdtemp()
+        try:
+            ydl_opts = {
+                "format": "best[ext=mp4]/best",
+                "outtmpl": f"{tmp_dir2}/ig_%(id)s.%(ext)s",
+                "noplaylist": True,
+                "quiet": True,
+                "http_headers": {
+                    "User-Agent": (
+                        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                        "Version/16.0 Mobile/15E148 Safari/604.1"
+                    ),
+                },
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info:
+                    title = info.get("title", "Instagram")
+            for f in os.listdir(tmp_dir2):
+                if f.endswith((".mp4", ".mov", ".webm", ".mkv", ".jpg", ".jpeg", ".png")):
+                    file_path = os.path.join(tmp_dir2, f)
+                    tmp_dir = tmp_dir2
+                    break
+        except Exception as e:
+            print("Instagram yt-dlp ERROR:", e)
+            tmp_dir = tmp_dir2
+
+    if file_path and os.path.exists(file_path):
+        bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
+        send_media_file(message.chat.id, file_path, title, msg.message_id, "📸 Instagram")
     else:
-        msg = bot.send_message(message.chat.id, "📸 Instagram Reel, ներբեռնում եմ...")
-        file_path, tmp_dir, title = download_instagram_video(url)
-        if file_path and os.path.exists(file_path):
-            bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
-            send_media_file(message.chat.id, file_path, title, msg.message_id, "📸 Instagram")
-        else:
-            bot.edit_message_text(
-                "❌ Չստացվեց ներբեռնել\n💡 Փորձիր /update և կրկնիր",
-                message.chat.id, msg.message_id
-            )
-        cleanup(tmp_dir)
+        bot.edit_message_text(
+            "❌ Չստացվեց ներբեռնել\n"
+            "💡 Instagram-ը կարող է փակ լինել կամ հղումը սխալ է",
+            message.chat.id, msg.message_id
+        )
+
+    cleanup(tmp_dir)
+
 
 # ─────────────────────────────
-# PINTEREST URL
+# PINTEREST URL — RapidAPI
 # ─────────────────────────────
 
 @bot.message_handler(func=lambda m: bool(PINTEREST_REGEX.search(m.text or "")))
@@ -705,7 +657,33 @@ def handle_pinterest_url(message):
     url = PINTEREST_REGEX.search(message.text).group(0)
     msg = bot.send_message(message.chat.id, "📌 Pinterest հղում, ներբեռնում եմ...")
 
-    file_path, tmp_dir, title = download_pinterest(url)
+    # Փորձ 1 — RapidAPI
+    file_path, tmp_dir, title = rapidapi_download(url)
+
+    # Փորձ 2 — yt-dlp fallback
+    if not file_path or not os.path.exists(file_path):
+        print("Pinterest RapidAPI failed, trying yt-dlp...")
+        cleanup(tmp_dir)
+        tmp_dir2 = tempfile.mkdtemp()
+        try:
+            ydl_opts = {
+                "format": "best",
+                "outtmpl": f"{tmp_dir2}/pin_%(id)s.%(ext)s",
+                "noplaylist": True,
+                "quiet": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info:
+                    title = info.get("title", "Pinterest")
+            for f in os.listdir(tmp_dir2):
+                if f.endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".webm")):
+                    file_path = os.path.join(tmp_dir2, f)
+                    tmp_dir = tmp_dir2
+                    break
+        except Exception as e:
+            print("Pinterest yt-dlp ERROR:", e)
+            tmp_dir = tmp_dir2
 
     if file_path and os.path.exists(file_path):
         bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
@@ -717,6 +695,7 @@ def handle_pinterest_url(message):
         )
 
     cleanup(tmp_dir)
+
 
 # ─────────────────────────────
 # PLAYLIST
@@ -762,6 +741,7 @@ def remove(message):
     else:
         bot.send_message(message.chat.id, "❌ Սխալ համար")
 
+
 # ─────────────────────────────
 # FALLBACK
 # ─────────────────────────────
@@ -770,6 +750,7 @@ def remove(message):
 def unknown(message):
     users.add(message.from_user.id)
     bot.send_message(message.chat.id, "❓ Գրիր /help")
+
 
 # ─────────────────────────────
 print("✅ BOT RUNNING...")
