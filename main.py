@@ -49,6 +49,16 @@ INSTAGRAM_REGEX = re.compile(
     r'(https?://)?(www\.)?instagram\.com/(p|reel|tv)/[\w\-]+'
 )
 
+# ─── ՆՈՐ: Pinterest regex ───
+PINTEREST_REGEX = re.compile(
+    r'(https?://)?(www\.|[a-z]{2}\.)?pinterest\.(com|co\.[a-z]+)/pin/[\w\-]+'
+)
+
+# ─── ՆՈՐ: Instagram նկարի regex (միայն /p/ — ոչ reel/tv) ───
+INSTAGRAM_PHOTO_REGEX = re.compile(
+    r'(https?://)?(www\.)?instagram\.com/p/[\w\-]+'
+)
+
 def has_ffmpeg():
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
@@ -60,25 +70,38 @@ FFMPEG_AVAILABLE = has_ffmpeg()
 print(f"ffmpeg: {'✅ կա' if FFMPEG_AVAILABLE else '❌ չկա'}")
 
 # ─────────────────────────────
-# START / HELP
+# START / HELP  ← ՆՈՐ: ուղարկում է նկար
 # ─────────────────────────────
+
+WELCOME_IMAGE_URL = "https://i.imgur.com/4M34hi2.png"  # ← Փոխիր քո ուզած նկարի URL-ով
 
 @bot.message_handler(commands=['start', 'help'])
 def start(message):
     users.add(message.from_user.id)
-    bot.send_message(
-        message.chat.id,
+
+    welcome_text = (
         "🎵 Բարի գալուստ Khachatryans Երգի Բոտ!\n\n"
         "🔍 /search երգի անուն — Որոնել\n"
         "🎧 /download երգի անուն — Ներբեռնել\n"
         "🔗 YouTube հղում — Ուղղակի ներբեռնել\n"
         "🎵 TikTok հղում — Վիդեո ներբեռնել\n"
-        "📸 Instagram հղում — Վիդեո ներբեռնել\n"
+        "📸 Instagram հղում — Վիդեո/նկար ներբեռնել\n"
+        "📌 Pinterest հղում — Նկար/վիդեո ներբեռնել\n"
         "➕ /add երգի անուն — Պլեյլիստ ավելացնել\n"
         "📋 /playlist — Պլեյլիստ տեսնել\n"
         "🗑 /remove համար — Հեռացնել\n"
         "🔄 /update — Թարմացնել yt-dlp"
     )
+
+    try:
+        bot.send_photo(
+            message.chat.id,
+            photo=WELCOME_IMAGE_URL,
+            caption=welcome_text
+        )
+    except Exception:
+        # Եթե նկարը չբեռնվի — ուղարկիր սովորական տեքստ
+        bot.send_message(message.chat.id, welcome_text)
 
 # ─────────────────────────────
 # UPDATE
@@ -265,6 +288,40 @@ def download_video(url):
         print("VIDEO DOWNLOAD ERROR:", e)
         return None, tmp_dir, None
 
+# ─── ՆՈՐ: PHOTO DOWNLOAD (Instagram նկար / Pinterest) ───
+
+def download_photo(url):
+    """Ներբեռնում է նկար՝ yt-dlp-ի միջոցով (Instagram photo, Pinterest)"""
+    tmp_dir = tempfile.mkdtemp()
+    title = "Անհայտ"
+
+    try:
+        ydl_opts = {
+            "format": "best",
+            "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
+            "noplaylist": True,
+            "quiet": True,
+            "writethumbnail": False,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info:
+                title = info.get("title", "Անհայտ")
+
+        # Փնտրում ենք բոլոր հնարավոր ֆայլերը
+        for f in os.listdir(tmp_dir):
+            if f.endswith((".jpg", ".jpeg", ".png", ".webp",
+                           ".mp4", ".mov", ".webm", ".mkv")):
+                return os.path.join(tmp_dir, f), tmp_dir, title
+
+        print("FILES IN TMP:", os.listdir(tmp_dir))
+        return None, tmp_dir, None
+
+    except Exception as e:
+        print("PHOTO DOWNLOAD ERROR:", e)
+        return None, tmp_dir, None
+
 
 def cleanup(tmp_dir):
     try:
@@ -291,6 +348,25 @@ def send_video_file(chat_id, file_path, title, msg_id, platform=""):
         bot.delete_message(chat_id, msg_id)
     except:
         pass
+
+
+# ─── ՆՈՐ: send_media_file — ուղարկում է նկար կամ վիդեո ───
+
+def send_media_file(chat_id, file_path, title, msg_id, platform=""):
+    """Ինքնաբերաբար ճանաչում է ֆայլի տեսակը և ուղարկում"""
+    try:
+        if file_path.endswith((".jpg", ".jpeg", ".png", ".webp")):
+            with open(file_path, "rb") as photo:
+                bot.send_photo(chat_id, photo, caption=f"{platform} {title}")
+        else:
+            with open(file_path, "rb") as video:
+                bot.send_video(chat_id, video, caption=f"{platform} {title}")
+        try:
+            bot.delete_message(chat_id, msg_id)
+        except:
+            pass
+    except Exception as e:
+        print("SEND MEDIA ERROR:", e)
 
 # ─────────────────────────────
 # DOWNLOAD COMMAND
@@ -367,20 +443,58 @@ def handle_tiktok_url(message):
     cleanup(tmp_dir)
 
 # ─────────────────────────────
-# INSTAGRAM URL
+# INSTAGRAM URL  ← ՆՈՐ ՏՐԱՄԱԲԱՆՈՒԹՅՈՒՆ
+# /p/ → նկար;  /reel/ կամ /tv/ → վիդեո
 # ─────────────────────────────
 
 @bot.message_handler(func=lambda m: bool(INSTAGRAM_REGEX.search(m.text or "")))
 def handle_instagram_url(message):
     users.add(message.from_user.id)
     url = INSTAGRAM_REGEX.search(message.text).group(0)
-    msg = bot.send_message(message.chat.id, "📸 Instagram հղում, ներբեռնում եմ...")
 
-    file_path, tmp_dir, title = download_video(url)
+    # Ստուգում՝ նկա՞ր, թե՞ վիդեո
+    is_photo = bool(INSTAGRAM_PHOTO_REGEX.match(url))
+
+    if is_photo:
+        msg = bot.send_message(message.chat.id, "📸 Instagram նկար, ներբեռնում եմ...")
+        file_path, tmp_dir, title = download_photo(url)
+        if file_path and os.path.exists(file_path):
+            bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
+            send_media_file(message.chat.id, file_path, title, msg.message_id, "📸 Instagram")
+        else:
+            bot.edit_message_text(
+                "❌ Չստացվեց ներբեռնել\n💡 Instagram-ը կարող է փակ լինել",
+                message.chat.id, msg.message_id
+            )
+        cleanup(tmp_dir)
+    else:
+        msg = bot.send_message(message.chat.id, "📸 Instagram հղում, ներբեռնում եմ...")
+        file_path, tmp_dir, title = download_video(url)
+        if file_path and os.path.exists(file_path):
+            bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
+            send_video_file(message.chat.id, file_path, title, msg.message_id, "📸 Instagram")
+        else:
+            bot.edit_message_text(
+                "❌ Չստացվեց ներբեռնել\n💡 Փորձիր /update և կրկնիր",
+                message.chat.id, msg.message_id
+            )
+        cleanup(tmp_dir)
+
+# ─────────────────────────────
+# ՆՈՐ: PINTEREST URL
+# ─────────────────────────────
+
+@bot.message_handler(func=lambda m: bool(PINTEREST_REGEX.search(m.text or "")))
+def handle_pinterest_url(message):
+    users.add(message.from_user.id)
+    url = PINTEREST_REGEX.search(message.text).group(0)
+    msg = bot.send_message(message.chat.id, "📌 Pinterest հղում, ներբեռնում եմ...")
+
+    file_path, tmp_dir, title = download_photo(url)
 
     if file_path and os.path.exists(file_path):
         bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
-        send_video_file(message.chat.id, file_path, title, msg.message_id, "📸 Instagram")
+        send_media_file(message.chat.id, file_path, title, msg.message_id, "📌 Pinterest")
     else:
         bot.edit_message_text(
             "❌ Չստացվեց ներբեռնել\n💡 Փորձիր /update և կրկնիր",
