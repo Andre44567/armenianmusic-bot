@@ -1,0 +1,14 @@
+# Netscape HTTP Cookie File
+# https://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file! Do not edit.
+
+.youtube.com	TRUE	/	TRUE	1792859180	__Secure-BUCKET	CJwD
+.youtube.com	TRUE	/	TRUE	1777308980	GPS	1
+.youtube.com	TRUE	/	FALSE	1811867224	HSID	Ag46TvCLCCl9PG2lX
+.youtube.com	TRUE	/	TRUE	1811867224	SSID	Au_PseyyY2gWEngFf
+.youtube.com	TRUE	/	FALSE	1811867224	APISID	CJCP1Qa1zkeAdtXn/AcroPFgmd3xKskUsH
+.youtube.com	TRUE	/	TRUE	1811867224	SAPISID	D5hALKxrDqrLDxZe/AETrn6rhTbxVGUKB3
+.youtube.com	TRUE	/	TRUE	1811867224	__Secure-1PAPISID	D5hALKxrDqrLDxZe/AETrn6rhTbxVGUKB3
+.youtube.com	TRUE	/	TRUE	1811867224	__Secure-3PAPISID	D5hALKxrDqrLDxZe/AETrn6rhTbxVGUKB3
+.youtube.com	TRUE	/	FALSE	1811867224	SID	g.a0009Qj2STQSJDKFqq2XxrNw1ODlFojBTIuBB_7ZevnpqETLGe_FgVlvzCEZ1GWQdxK-G0upfAACgYKAa0SARISFQHGX2MiPNP7KJdeWDWRiIKb7ki63RoVAUF8yKrsfytOJiPPV73p2QLo-FOf0076
+.youtube.com	TRUE	/	TRUE	1811867224	__Secure-1PSID	g.a0009Qj2STQSJDKFqq2XxrNw1ODlFojBTIuBB_7ZevnpqETLGe_FzIyochQ5n9HSoSwWWR_wagACgYKAb4SARISFQHGX2MixTaNL0GuNAg-vdB-qj
