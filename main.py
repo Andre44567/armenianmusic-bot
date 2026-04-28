@@ -65,6 +65,17 @@ def has_ffmpeg():
 FFMPEG_AVAILABLE = has_ffmpeg()
 print(f"ffmpeg: {'✅' if FFMPEG_AVAILABLE else '❌'}")
 
+# ─── YouTube Cookies ───
+COOKIES_FILE = "/tmp/youtube_cookies.txt"
+YT_COOKIES = os.environ.get("YOUTUBE_COOKIES", "")
+if YT_COOKIES:
+    with open(COOKIES_FILE, "w") as f:
+        f.write(YT_COOKIES)
+    print("✅ YouTube cookies loaded")
+else:
+    COOKIES_FILE = None
+    print("⚠️ No YouTube cookies")
+
 # ─────────────────────────────
 # START / HELP
 # ─────────────────────────────
@@ -266,6 +277,8 @@ def download_audio(query_or_url):
                 "preferredcodec": "mp3",
                 "preferredquality": "128",
             }]
+        if COOKIES_FILE:
+            ydl_opts["cookiefile"] = COOKIES_FILE
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(yt_source, download=True)
             if info and "entries" in info and info["entries"]:
