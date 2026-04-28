@@ -1,4 +1,3 @@
 pyTelegramBotAPI
-yt-dlp
-requests
-curl_cffi
+yt-dlp==2023.3.4
+gallery-dl
