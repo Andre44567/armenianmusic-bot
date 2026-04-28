@@ -29,9 +29,7 @@ install_deps()
 # CONFIG
 # ─────────────────────────────
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-if not TOKEN:
-    raise ValueError("❌ TELEGRAM_BOT_TOKEN չկա")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8665023673:AAG96HlfGh0Yj8Jj6P1_Yvj5N_bWIiobp54")
 
 ADMIN_ID = 7304274135
 
