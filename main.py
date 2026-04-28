@@ -1,393 +1,294 @@
 import os
-import tempfile
 import re
-import subprocess
-import sys
-import urllib.request
-import urllib.parse
-import json
+import asyncio
+import tempfile
+import shutil
+from dotenv import load_dotenv
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import yt_dlp
+import instaloader
+from database import save_user, get_all_users
 
-import telebot
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("7304274135"))
+WELCOME_IMAGE_URL = os.getenv("WELCOME_IMAGE_URL")
 
-# ─────────────────────────────
-# INSTALL DEPS
-# ─────────────────────────────
+user_state = {}
 
-def install_deps():
-    for pkg in ["yt-dlp", "gallery-dl"]:
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--upgrade", pkg,
-                 "--break-system-packages"],
-                capture_output=True
-            )
-            print(f"OK: {pkg}")
-        except Exception as e:
-            print(f"WARN: {pkg}: {e}")
+# ---- Platform detect ----
 
-install_deps()
+def detect_platform(url: str) -> str:
+    if re.search(r"instagram\.com", url):
+        return "instagram"
+    elif re.search(r"tiktok\.com", url):
+        return "tiktok"
+    elif re.search(r"pinterest\.(com|ca|co\.uk|fr|de|es|it|ru|jp)|pin\.it", url):
+        return "pinterest"
+    return "unknown"
 
-# ─────────────────────────────
-# CONFIG
-# ─────────────────────────────
+def is_url(text: str) -> bool:
+    return bool(re.search(r"https?://", text))
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8665023673:AAG96HlfGh0Yj8Jj6P1_Yvj5N_bWIiobp54")
-ADMIN_ID = 7304274135
+# ---- Download ----
 
-bot = telebot.TeleBot(TOKEN)
-playlists = {}
-users = set()
-
-WELCOME_IMAGE_URL = "https://i.ibb.co/wFSQWyb8/IMG-20260427-194624-991.jpg"
-
-TIKTOK_REGEX = re.compile(r'(https?://)?(www\.|vm\.|vt\.)?(tiktok\.com/)[\S]+')
-INSTAGRAM_REGEX = re.compile(r'(https?://)?(www\.)?instagram\.com/(p|reel|tv)/[\w\-]+')
-
-PLAYLIST_DIR = "/tmp/playlists"
-os.makedirs(PLAYLIST_DIR, exist_ok=True)
-
-# ─────────────────────────────
-# DEEZER
-# ─────────────────────────────
-
-def deezer_search(query, limit=3):
-    url = f"https://api.deezer.com/search?q={urllib.parse.quote(query)}&limit={limit}"
-    with urllib.request.urlopen(url, timeout=10) as r:
-        return json.loads(r.read()).get("data", [])
-
-def download_from_deezer(query, tmp_dir):
-    title = "Unknown"
-    try:
-        tracks = deezer_search(query, limit=1)
-        if not tracks:
-            return None, title
-
-        track = tracks[0]
-        artist = track.get("artist", {}).get("name", "")
-        name = track.get("title", "Unknown")
-        title = f"{artist} - {name}"
-        preview_url = track.get("preview", "")
-
-        if not preview_url:
-            return None, title
-
-        file_path = os.path.join(tmp_dir, "track.mp3")
-        urllib.request.urlretrieve(preview_url, file_path)
-
-        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-            print(f"OK Deezer: {title}")
-            return file_path, title
-
-    except Exception as e:
-        print(f"Deezer error: {e}")
-
-    return None, title
-
-# ─────────────────────────────
-# START / HELP
-# ─────────────────────────────
-
-@bot.message_handler(commands=['start', 'help'])
-def start(message):
-    users.add(message.from_user.id)
-    text = (
-        "🎵 Բարի գալուստ Yandeks Khachatryans Երգի Բոտ!\n\n"
-        "🔍 /search երգի անուն — Որոնել\n"
-        "🎧 /download երգի անուն — Ներբեռնել\n"
-        "🎵 TikTok հղում — Վիդեո ներբեռնել\n"
-        "📸 Instagram հղում — Վիդեո ներբեռնել\n"
-        "➕ /add երգի անուն — Պլեյլիստ ավելացնել\n"
-        "📋 /playlist — Պլեյлиst տеснел\n"
-        "🗑 /remove համар — Hеռацнел\n"
-        "🔄 /update — Tarmacnel\n\n"
-        "⚠️ Deezer preview — 30 վайркyан"
+def _sync_instagram(url: str, tmpdir: str) -> list:
+    L = instaloader.Instaloader(
+        download_videos=True,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+        post_metadata_txt_pattern="",
+        dirname_pattern=tmpdir,
+        filename_pattern="{shortcode}",
+        quiet=True,
     )
+    shortcode_match = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9_-]+)", url)
+    if not shortcode_match:
+        raise ValueError("Instagram URL-ը ճիշտ չէ")
+    shortcode = shortcode_match.group(1)
+    post = instaloader.Post.from_shortcode(L.context, shortcode)
+    L.download_post(post, target=tmpdir)
+    files = []
+    for f in os.listdir(tmpdir):
+        full = os.path.join(tmpdir, f)
+        if f.endswith((".jpg", ".jpeg", ".png", ".mp4")):
+            files.append(full)
+    return files
+
+def _sync_ytdlp(url: str, tmpdir: str) -> list:
+    ydl_opts = {
+        "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    files = []
+    for f in os.listdir(tmpdir):
+        full = os.path.join(tmpdir, f)
+        if os.path.isfile(full):
+            files.append(full)
+    return files
+
+# ---- Send media ----
+
+async def send_media(update: Update, files: list, caption: str):
+    for f in files:
+        ext = f.lower().split(".")[-1]
+        try:
+            if ext in ("mp4", "mov", "avi", "mkv"):
+                with open(f, "rb") as vid:
+                    await update.message.reply_video(vid, caption=caption or None, supports_streaming=True)
+            elif ext in ("jpg", "jpeg", "png", "webp"):
+                with open(f, "rb") as img:
+                    await update.message.reply_photo(img, caption=caption or None)
+        except Exception:
+            with open(f, "rb") as doc:
+                await update.message.reply_document(doc, caption=caption or None)
+
+# ---- /start ----
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    save_user(user_id)  # պահել օգտատիրոջը
+
+    # Ուղարկել welcome նկար + տեքստ
+    welcome_text = (
+        "👋 Բարև! Ես մեդիա ներբեռնիչ բոտ եմ 🤖\n\n"
+        "📌 Ինչ կարող եմ անել՝\n"
+        "📸 Instagram post / reel\n"
+        "🎵 TikTok վիդեո\n"
+        "📌 Pinterest նկար / վիդեո\n\n"
+        "✅ Ուղղակի ուղարկիր հղումը!"
+    )
+
     try:
-        bot.send_photo(message.chat.id, photo=WELCOME_IMAGE_URL, caption=text)
+        await update.message.reply_photo(
+            photo=WELCOME_IMAGE_URL,
+            caption=welcome_text
+        )
     except Exception:
-        bot.send_message(message.chat.id, text)
+        await update.message.reply_text(welcome_text)
 
-# ─────────────────────────────
-# UPDATE
-# ─────────────────────────────
+# ---- /broadcast ----
 
-@bot.message_handler(commands=['update'])
-def update_command(message):
-    users.add(message.from_user.id)
-    msg = bot.send_message(message.chat.id, "🔄 Updating...")
-    install_deps()
-    bot.edit_message_text("OK Updated", message.chat.id, msg.message_id)
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
 
-# ─────────────────────────────
-# BROADCAST
-# ─────────────────────────────
-
-@bot.message_handler(commands=['broadcast'])
-def broadcast(message):
-    users.add(message.from_user.id)
-    if message.from_user.id != ADMIN_ID:
-        bot.send_message(message.chat.id, "No access")
+    # Միայն admin
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Դու admin չես։")
         return
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        bot.send_message(message.chat.id, "/broadcast <text>")
+
+    # Վերցնել broadcast-ի տեքստը
+    # Օգտագործում՝ /broadcast Բարև բոլորին!
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ Գրիր հաղորդագրությունը հրամանից հետո։\n"
+            "Օրինակ՝ `/broadcast Բարև բոլորին!`",
+            parse_mode="Markdown"
+        )
         return
-    text = parts[1]
+
+    text = " ".join(context.args)
+    users = get_all_users()
+    msg = await update.message.reply_text(f"📤 Ուղարկում եմ {len(users)} հոգու...")
+
     success = 0
     failed = 0
-    for uid in users.copy():
+
+    for uid in users:
         try:
-            bot.send_message(uid, f"Broadcast: {text}")
+            await context.bot.send_message(chat_id=uid, text=text)
             success += 1
+            await asyncio.sleep(0.05)  # spam protection
         except Exception:
             failed += 1
-    bot.send_message(message.chat.id, f"Sent: {success}, Failed: {failed}")
 
-# ─────────────────────────────
-# SEARCH
-# ─────────────────────────────
+    await msg.edit_text(
+        f"✅ Broadcast ավարտվեց!\n"
+        f"📨 Ուղարկվեց՝ {success}\n"
+        f"❌ Չուղարկվեց՝ {failed}"
+    )
 
-@bot.message_handler(commands=['search'])
-def search(message):
-    users.add(message.from_user.id)
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        bot.send_message(message.chat.id, "Write: /search song name")
+# ---- /broadcast_photo ----
+
+async def broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Broadcast նկարով՝
+    Ուղարկիր նկար caption-ով /broadcast_photo հրամանով reply արա
+    """
+    user_id = update.message.from_user.id
+
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Դու admin չես։")
         return
-    query = parts[1]
-    msg = bot.send_message(message.chat.id, "Searching Deezer...")
-    try:
-        tracks = deezer_search(query, limit=3)
-        if not tracks:
-            bot.edit_message_text("Not found", message.chat.id, msg.message_id)
+
+    # Reply-ի մեջ նկար պետք է լինի
+    if not update.message.reply_to_message or not update.message.reply_to_message.photo:
+        await update.message.reply_text(
+            "⚠️ Ուղարկիր նկար caption-ով, հետո reply արա այդ նկարին /broadcast_photo հրամանով։"
+        )
+        return
+
+    photo = update.message.reply_to_message.photo[-1].file_id
+    caption = update.message.reply_to_message.caption or ""
+    users = get_all_users()
+
+    msg = await update.message.reply_text(f"📤 Ուղարկում եմ նկար {len(users)} հոգու...")
+
+    success = 0
+    failed = 0
+
+    for uid in users:
+        try:
+            await context.bot.send_photo(chat_id=uid, photo=photo, caption=caption)
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+
+    await msg.edit_text(
+        f"✅ Broadcast ավարտվեց!\n"
+        f"📨 Ուղարկվեց՝ {success}\n"
+        f"❌ Չուղարկվեց՝ {failed}"
+    )
+
+# ---- /stats ----
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Դու admin չես։")
+        return
+    users = get_all_users()
+    await update.message.reply_text(f"👥 Ընդհանուր օգտատերեր՝ {len(users)}")
+
+# ---- URL handler ----
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    text = update.message.text.strip()
+
+    if user_id in user_state and user_state[user_id].get("waiting_caption"):
+        caption = text
+        url = user_state[user_id]["url"]
+        platform = user_state[user_id]["platform"]
+        user_state.pop(user_id, None)
+        await process_download(update, url, platform, caption)
+        return
+
+    if is_url(text):
+        platform = detect_platform(text)
+        if platform == "unknown":
+            await update.message.reply_text("❌ Ճանաչված չէ։ Instagram / TikTok / Pinterest հղում ուղարկիր։")
             return
-        text = "Results from Deezer:\n\n"
-        for i, track in enumerate(tracks, 1):
-            artist = track.get("artist", {}).get("name", "")
-            name = track.get("title", "Unknown")
-            duration = track.get("duration", 0)
-            mins, secs = divmod(duration, 60)
-            text += f"{i}. {artist} - {name} ({mins}:{secs:02d})\n"
-        text += "\nNote: 30 second preview"
-        bot.edit_message_text(text, message.chat.id, msg.message_id)
-    except Exception as e:
-        print(f"Search error: {e}")
-        bot.edit_message_text("Error searching", message.chat.id, msg.message_id)
-
-# ─────────────────────────────
-# DOWNLOAD
-# ─────────────────────────────
-
-@bot.message_handler(commands=['download'])
-def download(message):
-    users.add(message.from_user.id)
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        bot.send_message(message.chat.id, "Write: /download song name")
-        return
-    query = parts[1]
-    msg = bot.send_message(message.chat.id, "Downloading from Deezer...")
-    tmp_dir = tempfile.mkdtemp()
-    file_path, title = download_from_deezer(query, tmp_dir)
-    if file_path and os.path.exists(file_path):
-        bot.edit_message_text(f"Sending: {title}", message.chat.id, msg.message_id)
-        with open(file_path, "rb") as audio:
-            bot.send_audio(message.chat.id, audio, title=title, performer="Deezer")
-        try:
-            bot.delete_message(message.chat.id, msg.message_id)
-        except:
-            pass
-    else:
-        bot.edit_message_text("Download failed", message.chat.id, msg.message_id)
-    try:
-        for f in os.listdir(tmp_dir):
-            os.remove(os.path.join(tmp_dir, f))
-        os.rmdir(tmp_dir)
-    except:
-        pass
-
-# ─────────────────────────────
-# TIKTOK
-# ─────────────────────────────
-
-@bot.message_handler(func=lambda m: bool(TIKTOK_REGEX.search(m.text or "")))
-def handle_tiktok(message):
-    users.add(message.from_user.id)
-    url = TIKTOK_REGEX.search(message.text).group(0)
-    msg = bot.send_message(message.chat.id, "TikTok downloading...")
-    tmp_dir = tempfile.mkdtemp()
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "gallery_dl", url, "-D", tmp_dir],
-            capture_output=True, text=True, timeout=60
+        user_state[user_id] = {"url": text, "platform": platform, "waiting_caption": True}
+        await update.message.reply_text(
+            f"✅ {platform.capitalize()} հղում ստացա!\n\n"
+            "✍️ Գրիր caption (տեքստ) կամ /skip եթե caption չես ուզում։"
         )
-        files = sorted(os.listdir(tmp_dir))
-        if files:
-            f = files[0]
-            file_path = os.path.join(tmp_dir, f)
-            title = f.rsplit(".", 1)[0]
-            ext = f.lower().rsplit(".", 1)[-1]
-            bot.edit_message_text(f"Sending: {title}", message.chat.id, msg.message_id)
-            if ext in ("jpg", "jpeg", "png", "webp"):
-                with open(file_path, "rb") as photo:
-                    bot.send_photo(message.chat.id, photo, caption=title)
-            else:
-                with open(file_path, "rb") as video:
-                    bot.send_video(message.chat.id, video, caption=title)
-            try:
-                bot.delete_message(message.chat.id, msg.message_id)
-            except:
-                pass
-        else:
-            bot.edit_message_text("Download failed", message.chat.id, msg.message_id)
-    except Exception as e:
-        print(f"TikTok error: {e}")
-        bot.edit_message_text("Download failed", message.chat.id, msg.message_id)
-    try:
-        for f in os.listdir(tmp_dir):
-            os.remove(os.path.join(tmp_dir, f))
-        os.rmdir(tmp_dir)
-    except:
-        pass
-
-# ─────────────────────────────
-# INSTAGRAM
-# ─────────────────────────────
-
-@bot.message_handler(func=lambda m: bool(INSTAGRAM_REGEX.search(m.text or "")))
-def handle_instagram(message):
-    users.add(message.from_user.id)
-    url = INSTAGRAM_REGEX.search(message.text).group(0)
-    msg = bot.send_message(message.chat.id, "Instagram downloading...")
-    tmp_dir = tempfile.mkdtemp()
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "gallery_dl", url, "-D", tmp_dir],
-            capture_output=True, text=True, timeout=60
-        )
-        files = sorted(os.listdir(tmp_dir))
-        if files:
-            f = files[0]
-            file_path = os.path.join(tmp_dir, f)
-            title = f.rsplit(".", 1)[0]
-            ext = f.lower().rsplit(".", 1)[-1]
-            bot.edit_message_text(f"Sending: {title}", message.chat.id, msg.message_id)
-            if ext in ("jpg", "jpeg", "png", "webp"):
-                with open(file_path, "rb") as photo:
-                    bot.send_photo(message.chat.id, photo, caption=title)
-            else:
-                with open(file_path, "rb") as video:
-                    bot.send_video(message.chat.id, video, caption=title)
-            try:
-                bot.delete_message(message.chat.id, msg.message_id)
-            except:
-                pass
-        else:
-            bot.edit_message_text("Download failed", message.chat.id, msg.message_id)
-    except Exception as e:
-        print(f"Instagram error: {e}")
-        bot.edit_message_text("Download failed", message.chat.id, msg.message_id)
-    try:
-        for f in os.listdir(tmp_dir):
-            os.remove(os.path.join(tmp_dir, f))
-        os.rmdir(tmp_dir)
-    except:
-        pass
-
-# ─────────────────────────────
-# PLAYLIST
-# ─────────────────────────────
-
-@bot.message_handler(commands=['add'])
-def add(message):
-    users.add(message.from_user.id)
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        bot.send_message(message.chat.id, "Write: /add song name")
         return
-    query = parts[1]
-    uid = message.from_user.id
-    msg = bot.send_message(message.chat.id, f"Adding: {query}...")
-    tmp_dir = tempfile.mkdtemp()
-    file_path, title = download_from_deezer(query, tmp_dir)
-    if file_path and os.path.exists(file_path):
-        user_dir = os.path.join(PLAYLIST_DIR, str(uid))
-        os.makedirs(user_dir, exist_ok=True)
-        save_path = os.path.join(user_dir, f"{len(playlists.get(uid, []))}.mp3")
-        os.rename(file_path, save_path)
-        playlists.setdefault(uid, []).append((title, save_path))
-        bot.edit_message_text(f"Added: {title}", message.chat.id, msg.message_id)
+
+    await update.message.reply_text("🔗 Ուղարկիր հղում Instagram / TikTok / Pinterest-ից։")
+
+async def skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id in user_state and user_state[user_id].get("waiting_caption"):
+        url = user_state[user_id]["url"]
+        platform = user_state[user_id]["platform"]
+        user_state.pop(user_id, None)
+        await process_download(update, url, platform, caption="")
     else:
-        bot.edit_message_text("Not found", message.chat.id, msg.message_id)
+        await update.message.reply_text("⚠️ Նախ ուղարկիր հղում։")
+
+async def process_download(update: Update, url: str, platform: str, caption: str):
+    msg = await update.message.reply_text(f"⏳ Ներբեռնում եմ {platform.capitalize()}-ից...")
+    tmpdir = tempfile.mkdtemp()
     try:
-        for f in os.listdir(tmp_dir):
-            os.remove(os.path.join(tmp_dir, f))
-        os.rmdir(tmp_dir)
-    except:
-        pass
+        loop = asyncio.get_event_loop()
+        if platform == "instagram":
+            files = await loop.run_in_executor(None, lambda: _sync_instagram(url, tmpdir))
+        else:
+            files = await loop.run_in_executor(None, lambda: _sync_ytdlp(url, tmpdir))
 
+        if not files:
+            await msg.edit_text("❌ Ոչինչ չգտնվեց։ Հղումը ստուգիր կամ հաշիվը private է։")
+            return
 
-@bot.message_handler(commands=['playlist'])
-def playlist(message):
-    users.add(message.from_user.id)
-    uid = message.from_user.id
-    if uid not in playlists or not playlists[uid]:
-        bot.send_message(message.chat.id, "Playlist is empty")
-        return
-    text = "Your playlist:\n\n"
-    for i, (title, _) in enumerate(playlists[uid], 1):
-        text += f"{i}. {title}\n"
-    text += "\nSend all — /playall"
-    bot.send_message(message.chat.id, text)
+        await msg.edit_text("📤 Ուղարկում եմ...")
+        await send_media(update, files, caption)
+        await msg.delete()
+        await update.message.reply_text("✅ Պատրաստ է! Forward արա ում ուզում ես 🚀")
 
+    except instaloader.exceptions.LoginRequiredException:
+        await msg.edit_text("🔒 Այս Instagram հաշիվը private է։")
+    except Exception as e:
+        await msg.edit_text(f"❌ Սխալ՝ {str(e)[:200]}")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
-@bot.message_handler(commands=['playall'])
-def playall(message):
-    users.add(message.from_user.id)
-    uid = message.from_user.id
-    if uid not in playlists or not playlists[uid]:
-        bot.send_message(message.chat.id, "Playlist is empty")
-        return
-    bot.send_message(message.chat.id, f"Sending {len(playlists[uid])} songs...")
-    for title, file_path in playlists[uid]:
-        try:
-            if os.path.exists(file_path):
-                with open(file_path, "rb") as audio:
-                    bot.send_audio(message.chat.id, audio, title=title, performer="Deezer")
-            else:
-                bot.send_message(message.chat.id, f"File missing: {title}")
-        except Exception as e:
-            print(f"playall error: {e}")
+# ---- Main ----
 
+def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("skip", skip))
+    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("broadcast_photo", broadcast_photo))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("✅ Bot is running...")
+    app.run_polling(drop_pending_updates=True)
 
-@bot.message_handler(commands=['remove'])
-def remove(message):
-    users.add(message.from_user.id)
-    parts = message.text.split(maxsplit=1)
-    uid = message.from_user.id
-    if len(parts) < 2 or not parts[1].isdigit():
-        bot.send_message(message.chat.id, "Write: /remove number")
-        return
-    idx = int(parts[1]) - 1
-    if uid in playlists and 0 <= idx < len(playlists[uid]):
-        title, file_path = playlists[uid].pop(idx)
-        try:
-            os.remove(file_path)
-        except:
-            pass
-        bot.send_message(message.chat.id, f"Removed: {title}")
-    else:
-        bot.send_message(message.chat.id, "Wrong number")
-
-# ─────────────────────────────
-# FALLBACK
-# ─────────────────────────────
-
-@bot.message_handler(func=lambda m: True)
-def unknown(message):
-    users.add(message.from_user.id)
-    bot.send_message(message.chat.id, "Write /help")
-
-# ─────────────────────────────
-print("BOT RUNNING...")
-bot.polling(none_stop=True)
+if __name__ == "__main__":
+    main()
