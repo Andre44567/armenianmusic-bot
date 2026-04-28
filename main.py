@@ -220,7 +220,36 @@ def download_audio(query_or_url):
     except Exception as e:
         print(f"SoundCloud failed: {e}")
 
-    # 3. YouTube
+    # 3. Yandex Music
+    try:
+        ym_query = f"ymsearch:{query_or_url}" if not is_url else query_or_url
+        ydl_opts_ym = {
+            "format": "bestaudio/best",
+            "outtmpl": f"{tmp_dir}/%(title)s.%(ext)s",
+            "noplaylist": True,
+            "quiet": True,
+            "socket_timeout": 30,
+        }
+        if FFMPEG_AVAILABLE:
+            ydl_opts_ym["postprocessors"] = [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "128",
+            }]
+        with yt_dlp.YoutubeDL(ydl_opts_ym) as ydl:
+            info = ydl.extract_info(ym_query, download=True)
+            if info and "entries" in info and info["entries"]:
+                title = info["entries"][0].get("title", "Անհայտ")
+            elif info:
+                title = info.get("title", "Անհայտ")
+        for f in os.listdir(tmp_dir):
+            if f.endswith((".mp3", ".m4a", ".webm", ".ogg", ".opus")):
+                print(f"✅ Yandex Music: {title}")
+                return os.path.join(tmp_dir, f), tmp_dir, title
+    except Exception as e:
+        print(f"Yandex Music failed: {e}")
+
+    # 4. YouTube
     try:
         yt_source = query_or_url.strip() if is_url else f"ytsearch1:{query_or_url}"
         ydl_opts = {
