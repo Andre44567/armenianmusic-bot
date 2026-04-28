@@ -3,21 +3,38 @@ import re
 import asyncio
 import tempfile
 import shutil
-from dotenv import load_dotenv
+import json
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import yt_dlp
 import instaloader
-from database import save_user, get_all_users
 
-load_dotenv()
+# ---- Config ----
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("7304274135"))
-WELCOME_IMAGE_URL = os.getenv("WELCOME_IMAGE_URL")
+ADMIN_ID = int(os.getenv("7304274135", "0"))
+WELCOME_IMAGE_URL = os.getenv("WELCOME_IMAGE_URL", "")
+DB_FILE = "users.json"
+
+# ---- Database ----
+
+def load_users() -> set:
+    if not os.path.exists(DB_FILE):
+        return set()
+    with open(DB_FILE, "r") as f:
+        return set(json.load(f))
+
+def save_user(user_id: int):
+    users = load_users()
+    users.add(user_id)
+    with open(DB_FILE, "w") as f:
+        json.dump(list(users), f)
+
+def get_all_users() -> list:
+    return list(load_users())
+
+# ---- Helpers ----
 
 user_state = {}
-
-# ---- Platform detect ----
 
 def detect_platform(url: str) -> str:
     if re.search(r"instagram\.com", url):
@@ -95,13 +112,12 @@ async def send_media(update: Update, files: list, caption: str):
             with open(f, "rb") as doc:
                 await update.message.reply_document(doc, caption=caption or None)
 
-# ---- /start ----
+# ---- Handlers ----
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    save_user(user_id)  # պահել օգտատիրոջը
+    save_user(user_id)
 
-    # Ուղարկել welcome նկար + տեքստ
     welcome_text = (
         "👋 Բարև! Ես մեդիա ներբեռնիչ բոտ եմ 🤖\n\n"
         "📌 Ինչ կարող եմ անել՝\n"
@@ -112,29 +128,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        await update.message.reply_photo(
-            photo=WELCOME_IMAGE_URL,
-            caption=welcome_text
-        )
+        if WELCOME_IMAGE_URL:
+            await update.message.reply_photo(photo=WELCOME_IMAGE_URL, caption=welcome_text)
+        else:
+            await update.message.reply_text(welcome_text)
     except Exception:
         await update.message.reply_text(welcome_text)
 
-# ---- /broadcast ----
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    if user_id in user_state and user_state[user_id].get("waiting_caption"):
+        url = user_state[user_id]["url"]
+        platform = user_state[user_id]["platform"]
+        user_state.pop(user_id, None)
+        await process_download(update, url, platform, caption="")
+    else:
+        await update.message.reply_text("⚠️ Նախ ուղարկիր հղում։")
 
-    # Միայն admin
-    if user_id != ADMIN_ID:
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Դու admin չես։")
         return
+    users = get_all_users()
+    await update.message.reply_text(f"👥 Ընդհանուր օգտատերեր՝ {len(users)}")
 
-    # Վերցնել broadcast-ի տեքստը
-    # Օգտագործում՝ /broadcast Բարև բոլորին!
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Դու admin չես։")
+        return
     if not context.args:
         await update.message.reply_text(
-            "⚠️ Գրիր հաղորդագրությունը հրամանից հետո։\n"
-            "Օրինակ՝ `/broadcast Բարև բոլորին!`",
+            "⚠️ Օրինակ՝ `/broadcast Բարև բոլորին!`",
             parse_mode="Markdown"
         )
         return
@@ -145,12 +169,11 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     success = 0
     failed = 0
-
     for uid in users:
         try:
             await context.bot.send_message(chat_id=uid, text=text)
             success += 1
-            await asyncio.sleep(0.05)  # spam protection
+            await asyncio.sleep(0.05)
         except Exception:
             failed += 1
 
@@ -160,35 +183,21 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"❌ Չուղարկվեց՝ {failed}"
     )
 
-# ---- /broadcast_photo ----
-
 async def broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Broadcast նկարով՝
-    Ուղարկիր նկար caption-ով /broadcast_photo հրամանով reply արա
-    """
-    user_id = update.message.from_user.id
-
-    if user_id != ADMIN_ID:
+    if update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Դու admin չես։")
         return
-
-    # Reply-ի մեջ նկար պետք է լինի
     if not update.message.reply_to_message or not update.message.reply_to_message.photo:
-        await update.message.reply_text(
-            "⚠️ Ուղարկիր նկար caption-ով, հետո reply արա այդ նկարին /broadcast_photo հրամանով։"
-        )
+        await update.message.reply_text("⚠️ Նկար ուղարկիր caption-ով, հետո reply արա /broadcast_photo հրամանով։")
         return
 
     photo = update.message.reply_to_message.photo[-1].file_id
     caption = update.message.reply_to_message.caption or ""
     users = get_all_users()
-
     msg = await update.message.reply_text(f"📤 Ուղարկում եմ նկար {len(users)} հոգու...")
 
     success = 0
     failed = 0
-
     for uid in users:
         try:
             await context.bot.send_photo(chat_id=uid, photo=photo, caption=caption)
@@ -202,18 +211,6 @@ async def broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📨 Ուղարկվեց՝ {success}\n"
         f"❌ Չուղարկվեց՝ {failed}"
     )
-
-# ---- /stats ----
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ Դու admin չես։")
-        return
-    users = get_all_users()
-    await update.message.reply_text(f"👥 Ընդհանուր օգտատերեր՝ {len(users)}")
-
-# ---- URL handler ----
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -235,21 +232,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_state[user_id] = {"url": text, "platform": platform, "waiting_caption": True}
         await update.message.reply_text(
             f"✅ {platform.capitalize()} հղում ստացա!\n\n"
-            "✍️ Գրիր caption (տեքստ) կամ /skip եթե caption չես ուզում։"
+            "✍️ Գրիր caption կամ /skip եթե caption չես ուզում։"
         )
         return
 
     await update.message.reply_text("🔗 Ուղարկիր հղում Instagram / TikTok / Pinterest-ից։")
-
-async def skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id in user_state and user_state[user_id].get("waiting_caption"):
-        url = user_state[user_id]["url"]
-        platform = user_state[user_id]["platform"]
-        user_state.pop(user_id, None)
-        await process_download(update, url, platform, caption="")
-    else:
-        await update.message.reply_text("⚠️ Նախ ուղարկիր հղում։")
 
 async def process_download(update: Update, url: str, platform: str, caption: str):
     msg = await update.message.reply_text(f"⏳ Ներբեռնում եմ {platform.capitalize()}-ից...")
@@ -262,7 +249,7 @@ async def process_download(update: Update, url: str, platform: str, caption: str
             files = await loop.run_in_executor(None, lambda: _sync_ytdlp(url, tmpdir))
 
         if not files:
-            await msg.edit_text("❌ Ոչինչ չգտնվեց։ Հղումը ստուգիր կամ հաշիվը private է։")
+            await msg.edit_text("❌ Ոչինչ չգտնվեց։")
             return
 
         await msg.edit_text("📤 Ուղարկում եմ...")
@@ -283,9 +270,9 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("skip", skip))
+    app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("broadcast_photo", broadcast_photo))
-    app.add_handler(CommandHandler("stats", stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("✅ Bot is running...")
     app.run_polling(drop_pending_updates=True)
