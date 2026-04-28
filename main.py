@@ -126,11 +126,11 @@ def broadcast(message):
     )
 
 # ─────────────────────────────
-# YANDEX MUSIC DOWNLOAD
+# YOUTUBE DOWNLOAD (փոխված Yandex-ից)
 # ─────────────────────────────
 
-def download_from_yandex(query, tmp_dir):
-    """Yandex Music-ից ներբեռնում"""
+def download_from_youtube(query, tmp_dir):
+    """YouTube-ից ներբեռնում"""
     title = "Անհայտ"
     try:
         ydl_opts = {
@@ -145,10 +145,11 @@ def download_from_yandex(query, tmp_dir):
             ydl_opts["postprocessors"] = [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
-                "preferredquality": "128",
+                "preferredquality": "192",
             }]
 
-        source = f"ymsearch1:{query}"
+        # ✅ ytsearch — YouTube-ից, login չի պահանջում
+        source = f"ytsearch1:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(source, download=True)
             if info and "entries" in info and info["entries"]:
@@ -158,11 +159,11 @@ def download_from_yandex(query, tmp_dir):
 
         for f in os.listdir(tmp_dir):
             if f.endswith((".mp3", ".m4a", ".webm", ".ogg", ".opus")):
-                print(f"✅ Yandex Music: {title}")
+                print(f"✅ YouTube: {title}")
                 return os.path.join(tmp_dir, f), title
 
     except Exception as e:
-        print(f"Yandex Music failed: {e}")
+        print(f"YouTube download failed: {e}")
 
     return None, title
 
@@ -178,14 +179,15 @@ def search(message):
         bot.send_message(message.chat.id, "⚠️ Գրիր՝ /search երգի անուն")
         return
     query = parts[1]
-    bot.send_message(message.chat.id, "🔍 Որոնում եմ Yandex Music-ում...")
+    bot.send_message(message.chat.id, "🔍 Որոնում եմ YouTube-ում...")
     try:
         with yt_dlp.YoutubeDL({"quiet": True, "noplaylist": True, "skip_download": True}) as ydl:
-            info = ydl.extract_info(f"ymsearch3:{query}", download=False)
+            # ✅ ytsearch3 — YouTube
+            info = ydl.extract_info(f"ytsearch3:{query}", download=False)
         if not info or "entries" not in info or not info["entries"]:
             bot.send_message(message.chat.id, "❌ Չգտնվեց")
             return
-        text = "🎵 Yandex Music-ում գտնվեց՝\n\n"
+        text = "🎵 YouTube-ում գտնվեց՝\n\n"
         for i, entry in enumerate(info["entries"][:3], 1):
             title = entry.get("title", "Անհայտ")
             duration = entry.get("duration", 0) or 0
@@ -208,13 +210,13 @@ def download(message):
         bot.send_message(message.chat.id, "⚠️ Գրիր՝ /download երգի անուն")
         return
     query = parts[1]
-    msg = bot.send_message(message.chat.id, "⏳ Yandex Music-ից ներբեռնում եմ...")
+    msg = bot.send_message(message.chat.id, "⏳ YouTube-ից ներբեռնում եմ...")
     tmp_dir = tempfile.mkdtemp()
-    file_path, title = download_from_yandex(query, tmp_dir)
+    file_path, title = download_from_youtube(query, tmp_dir)
     if file_path and os.path.exists(file_path):
         bot.edit_message_text(f"📤 Ուղարկում եմ՝ {title}", message.chat.id, msg.message_id)
         with open(file_path, "rb") as audio:
-            bot.send_audio(message.chat.id, audio, title=title, performer="🎵 Yandex Music")
+            bot.send_audio(message.chat.id, audio, title=title, performer="🎵 YouTube")
         try:
             bot.delete_message(message.chat.id, msg.message_id)
         except:
@@ -333,7 +335,7 @@ def add(message):
     msg = bot.send_message(message.chat.id, f"⏳ Ավելացնում եմ՝ {query}...")
 
     tmp_dir = tempfile.mkdtemp()
-    file_path, title = download_from_yandex(query, tmp_dir)
+    file_path, title = download_from_youtube(query, tmp_dir)
 
     if file_path and os.path.exists(file_path):
         # Պահել playlist թղթապանակում
@@ -382,7 +384,7 @@ def playall(message):
         try:
             if os.path.exists(file_path):
                 with open(file_path, "rb") as audio:
-                    bot.send_audio(message.chat.id, audio, title=title, performer="🎵 Yandex Music")
+                    bot.send_audio(message.chat.id, audio, title=title, performer="🎵 YouTube")
             else:
                 bot.send_message(message.chat.id, f"❌ {title} — ֆայլը չկա")
         except Exception as e:
