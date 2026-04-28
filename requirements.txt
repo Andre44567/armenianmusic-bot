@@ -1,3 +1,6 @@
-pyTelegramBotAPI
+python-telegram-bot==20.7
 yt-dlp
-gallery-dl
+instaloader
+python-dotenv
+Pillow
+requests
