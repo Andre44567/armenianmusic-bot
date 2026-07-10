@@ -1,205 +1,209 @@
 import os
+import re
 import logging
-import asyncio
+import threading
+import subprocess
+import tempfile
+
+# Ինքնաշխատ թարմացնում ենք yt-dlp-ը սերվերի վրա (հաջորդ գործարկման ժամանակ կկիրառվի)
+try:
+    subprocess.run(["pip", "install", "--upgrade", "yt-dlp", "--quiet"], check=False)
+except Exception:
+    pass
+
+import telebot
+from telebot import types
 import yt_dlp
 
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+# ---------------------- ԿԱՐԳԱՎՈՐՈՒՄՆԵՐ ----------------------
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+START_PHOTO_URL = os.environ.get("START_PHOTO_URL", "")
 
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable-ը սահմանված չէ!")
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+bot = telebot.TeleBot(BOT_TOKEN)
 
 users = set()
+pending_urls = {}  # message_id -> url (YouTube ձևաչափի ընտրության համար)
+
+DOWNLOAD_DIR = tempfile.gettempdir()
+
+YOUTUBE_RE = re.compile(r"(youtube\.com|youtu\.be)", re.IGNORECASE)
+INSTAGRAM_RE = re.compile(r"instagram\.com", re.IGNORECASE)
+THREADS_RE = re.compile(r"threads\.net", re.IGNORECASE)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    users.add(update.effective_user.id)
-
-    text = (
-        "🎵 Բարի գալուստ\n\n"
-        "📥 YouTube → MP3\n"
-        "📥 TikTok / Instagram → MP4\n\n"
-        "📎 Ուղարկիր հղումը"
-    )
-
-    await update.message.reply_text(text)
+def is_admin(user_id):
+    return user_id == ADMIN_ID
 
 
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Դու ադմին չես")
-        return
-
-    text = " ".join(context.args)
-
-    if not text:
-        await update.message.reply_text(
-            "Օգտագործում:\n/broadcast text"
-        )
-        return
-
-    ok = 0
-    fail = 0
-
-    for uid in users:
-        try:
-            await context.bot.send_message(uid, text)
-            ok += 1
-        except Exception:
-            fail += 1
-
-    await update.message.reply_text(
-        f"✅ Ուղարկվեց {ok}\n❌ Սխալ {fail}"
-    )
+def detect_platform(url):
+    if YOUTUBE_RE.search(url):
+        return "youtube"
+    if INSTAGRAM_RE.search(url):
+        return "instagram"
+    if THREADS_RE.search(url):
+        return "threads"
+    return None
 
 
-def download_audio(url):
+# ---------------------- ՆԵՐԲԵՌՆՄԱՆ ՖՈՒՆԿՑԻԱ ----------------------
+
+def download_and_send(chat_id, url, audio_only=False):
+    bot.send_chat_action(chat_id, "typing")
+
     ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": "/tmp/%(id)s.%(ext)s",
+        "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
         "quiet": True,
         "noplaylist": True,
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ],
+        "format": "bestaudio/best" if audio_only else "best",
     }
+    if audio_only:
+        ydl_opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }]
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-
-        file_path = f"/tmp/{info['id']}.mp3"
-        title = info.get("title", "audio")
-
-        return file_path, title
-
-
-def download_video(url):
-    ydl_opts = {
-        "format": "best[ext=mp4]/best",
-        "outtmpl": "/tmp/%(id)s.%(ext)s",
-        "quiet": True,
-        "noplaylist": True,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-
-        ext = info.get("ext", "mp4")
-        file_path = f"/tmp/{info['id']}.{ext}"
-        title = info.get("title", "video")
-
-        return file_path, title
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    users.add(update.effective_user.id)
-
-    if not update.message or not update.message.text:
-        return
-
-    url = update.message.text.strip()
-
-    if not url.startswith("http"):
-        await update.message.reply_text(
-            "❌ Ուղարկիր ճիշտ հղում"
-        )
-        return
-
-    is_youtube = (
-        "youtube.com" in url
-        or "youtu.be" in url
-    )
-
-    is_tiktok = "tiktok.com" in url
-    is_instagram = "instagram.com" in url
-
-    status = await update.message.reply_text(
-        "⏳ Բեռնվում է..."
-    )
-
+    filename = None
     try:
-        if is_youtube:
-            path, title = await asyncio.to_thread(
-                download_audio,
-                url
-            )
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            if audio_only:
+                filename = os.path.splitext(filename)[0] + ".mp3"
 
-            with open(path, "rb") as audio:
-                await update.message.reply_audio(
-                    audio=audio,
-                    title=title
-                )
+        ext = os.path.splitext(filename)[1].lower()
+        title = (info.get("title") or "Ֆայլ")[:60]
 
-            os.remove(path)
-
-        elif is_tiktok or is_instagram:
-            path, title = await asyncio.to_thread(
-                download_video,
-                url
-            )
-
-            with open(path, "rb") as video:
-                await update.message.reply_video(
-                    video=video,
-                    caption=title
-                )
-
-            os.remove(path)
-
-        else:
-            await status.edit_text(
-                "❌ Միայն YouTube / TikTok / Instagram"
-            )
-            return
-
-        await status.delete()
+        with open(filename, "rb") as f:
+            if audio_only or ext == ".mp3":
+                bot.send_audio(chat_id, f, title=title)
+            elif ext in (".jpg", ".jpeg", ".png", ".webp"):
+                bot.send_photo(chat_id, f)
+            else:
+                bot.send_video(chat_id, f, caption=title)
 
     except Exception as e:
-        logger.error(e)
-
-        await status.edit_text(
-            f"❌ Սխալ:\n{str(e)}"
+        logger.exception("Download failed for %s", url)
+        bot.send_message(
+            chat_id,
+            "❌ Ներբեռնումը ձախողվեց։ Հնարավոր է՝ հղումը սխալ է, "
+            "էջը փակ/պաշտպանված է, կամ պլատֆորմը ժամանակավորապես արգելափակել է հասանելիությունը։"
         )
+    finally:
+        if filename and os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except OSError:
+                pass
 
 
-def main():
-    if not BOT_TOKEN:
-        print("BOT_TOKEN not found")
-        return
+# ---------------------- ՀՐԱՄԱՆՆԵՐ ----------------------
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+@bot.message_handler(commands=["start"])
+def start_handler(message):
+    users.add(message.chat.id)
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("📖 Ինչպես օգտագործել", callback_data="help"))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("broadcast", broadcast))
-
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message
-        )
+    text = (
+        "👋 Բարի գալուստ!\n\n"
+        "Ուղարկիր ինձ հղում YouTube, Instagram կամ Threads-ից, "
+        "և ես կներբեռնեմ երգը, վիդեոն կամ նկարը քեզ համար։"
     )
 
-    print("Bot started...")
+    if START_PHOTO_URL:
+        bot.send_photo(message.chat.id, START_PHOTO_URL, caption=text, reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, text, reply_markup=markup)
 
-    app.run_polling(close_loop=False)
 
+@bot.callback_query_handler(func=lambda call: call.data == "help")
+def help_callback(call):
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        call.message.chat.id,
+        "📌 Պարզապես ուղարկիր հղումը (YouTube/Instagram/Threads) և ես կուղարկեմ ֆայլը։\n\n"
+        "Ադմինիստրատորի համար՝\n"
+        "/broadcast <տեքստ> — հաղորդագրություն կուղարկվի բոլոր օգտատերերին։"
+    )
+
+
+@bot.message_handler(commands=["broadcast"])
+def broadcast_handler(message):
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, "⛔ Այս հրամանը հասանելի է միայն ադմինիստրատորին։")
+        return
+
+    text = message.text.replace("/broadcast", "", 1).strip()
+    if not text:
+        bot.reply_to(message, "✏️ Օգտագործում՝ /broadcast Ձեր հաղորդագրությունը")
+        return
+
+    sent, failed = 0, 0
+    for chat_id in list(users):
+        try:
+            bot.send_message(chat_id, text)
+            sent += 1
+        except Exception:
+            failed += 1
+
+    bot.reply_to(message, f"✅ Ուղարկվեց {sent} օգտատերի։\n❌ Չհաջողվեց՝ {failed}")
+
+
+# ---------------------- ՀՂՈՒՄՆԵՐԻ ՄՇԱԿՈՒՄ ----------------------
+
+@bot.message_handler(func=lambda m: m.content_type == "text" and m.text.strip().startswith("http"))
+def link_handler(message):
+    users.add(message.chat.id)
+    url = message.text.strip()
+    platform = detect_platform(url)
+
+    if platform is None:
+        bot.reply_to(message, "❌ Այս հղումը չեմ ճանաչում։ Ուղարկիր YouTube, Instagram կամ Threads հղում։")
+        return
+
+    if platform == "youtube":
+        markup = types.InlineKeyboardMarkup()
+        markup.row(
+            types.InlineKeyboardButton("🎵 Երգ (MP3)", callback_data="yt_audio"),
+            types.InlineKeyboardButton("🎬 Վիդեո", callback_data="yt_video"),
+        )
+        sent_msg = bot.reply_to(message, "Ընտրիր ձևաչափը 👇", reply_markup=markup)
+        pending_urls[sent_msg.message_id] = url
+    else:
+        bot.reply_to(message, "⏳ Ներբեռնում եմ, մի պահ...")
+        threading.Thread(target=download_and_send, args=(message.chat.id, url, False)).start()
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("yt_audio", "yt_video"))
+def yt_choice_callback(call):
+    bot.answer_callback_query(call.id)
+    url = pending_urls.pop(call.message.message_id, None)
+
+    if not url:
+        bot.send_message(call.message.chat.id, "❌ Հղումի ժամկետը լրացել է, կրկին ուղարկիր հղումը։")
+        return
+
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+
+    audio_only = call.data == "yt_audio"
+    bot.send_message(call.message.chat.id, "⏳ Ներբեռնում եմ, մի պահ...")
+    threading.Thread(target=download_and_send, args=(call.message.chat.id, url, audio_only)).start()
+
+
+# ---------------------- ԳՈՐԾԱՐԿՈՒՄ ----------------------
 
 if __name__ == "__main__":
-    main()
+    logger.info("Բոտը գործարկվեց...")
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
