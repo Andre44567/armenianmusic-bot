@@ -1,4 +1,4 @@
-import os
+            import os
 import re
 import logging
 import threading
@@ -20,9 +20,18 @@ import yt_dlp
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 START_PHOTO_URL = os.environ.get("START_PHOTO_URL", "")
+YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable-ը սահմանված չէ!")
+
+# Եթե YOUTUBE_COOKIES փոփոխականը սահմանված է, գրում ենք ֆայլի մեջ,
+# որպեսզի yt-dlp-ն օգտագործի YouTube-ի "bot չեմ" ստուգումը շրջանցելու համար
+COOKIES_FILE = None
+if YOUTUBE_COOKIES.strip():
+    COOKIES_FILE = os.path.join(tempfile.gettempdir(), "cookies.txt")
+    with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+        f.write(YOUTUBE_COOKIES)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -63,7 +72,17 @@ def download_and_send(chat_id, url, audio_only=False):
         "quiet": True,
         "noplaylist": True,
         "format": "bestaudio/best" if audio_only else "best",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios"],
+            }
+        },
+        "http_headers": {
+            "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 14) gzip"
+        },
     }
+    if COOKIES_FILE:
+        ydl_opts["cookiefile"] = COOKIES_FILE
     if audio_only:
         ydl_opts["postprocessors"] = [{
             "key": "FFmpegExtractAudio",
