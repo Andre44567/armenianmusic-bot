@@ -72,14 +72,6 @@ def download_and_send(chat_id, url, audio_only=False):
         "quiet": True,
         "noplaylist": True,
         "format": "bestaudio/best" if audio_only else "best",
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "ios"],
-            }
-        },
-        "http_headers": {
-            "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 14) gzip"
-        },
     }
     if COOKIES_FILE:
         ydl_opts["cookiefile"] = COOKIES_FILE
