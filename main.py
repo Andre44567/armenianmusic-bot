@@ -1,5 +1,7 @@
+
 import os
 import re
+import glob
 import logging
 import threading
 import subprocess
@@ -71,7 +73,8 @@ def download_and_send(chat_id, url, audio_only=False):
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
         "quiet": True,
         "noplaylist": True,
-        "format": "bestaudio/best" if audio_only else "best",
+        "format": "bestaudio/best" if audio_only else "bestvideo*+bestaudio/best",
+        "merge_output_format": "mp4",
     }
     if COOKIES_FILE:
         ydl_opts["cookiefile"] = COOKIES_FILE
@@ -86,9 +89,12 @@ def download_and_send(chat_id, url, audio_only=False):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+            base = os.path.splitext(ydl.prepare_filename(info))[0]
             if audio_only:
-                filename = os.path.splitext(filename)[0] + ".mp3"
+                filename = base + ".mp3"
+            else:
+                candidates = [p for p in glob.glob(base + ".*") if not p.endswith((".part", ".ytdl"))]
+                filename = candidates[0] if candidates else ydl.prepare_filename(info)
 
         ext = os.path.splitext(filename)[1].lower()
         title = (info.get("title") or "Ֆայլ")[:60]
