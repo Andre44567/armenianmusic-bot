@@ -70,7 +70,8 @@ def download_and_send(chat_id, url, audio_only=False):
 
     ydl_opts = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
-        "quiet": True,
+        "quiet": False,
+        "verbose": True,
         "noplaylist": True,
         "format": "bestaudio/best" if audio_only else "bestvideo*+bestaudio/best",
         "merge_output_format": "mp4",
