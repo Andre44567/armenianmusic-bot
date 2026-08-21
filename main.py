@@ -1,5 +1,7 @@
+import os
 import sqlite3
 import random
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -12,8 +14,10 @@ from telegram.ext import (
 # SETTINGS
 # =========================
 
-BOT_TOKEN = "ՔՈ_BOT_TOKENԸ"
-ADMIN_IDS = {123456789} # Այստեղ գրիր քո Telegram ID-ն
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# Այստեղ գրիր ՔՈ Telegram numeric ID-ն
+ADMIN_IDS = {ՔՈ_TELEGRAM_ID}
 
 DB = "mafia.db"
 
@@ -62,7 +66,9 @@ def register_user(user_id, username):
     """, (user_id, username))
 
     cur.execute("""
-        UPDATE users SET username = ? WHERE user_id = ?
+        UPDATE users
+        SET username = ?
+        WHERE user_id = ?
     """, (username, user_id))
 
     db.commit()
@@ -133,7 +139,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Բարի գալուստ, {user.first_name} 👋\n\n"
         "🎭 Բարի գալուստ Mafia աշխարհ։\n"
-        "💎 Այստեղ կարող ես խաղալ, հավաքել ադամանդներ և բացել հատուկ հնարավորություններ։",
+        "💎 Այստեղ կարող ես խաղալ, հավաքել ադամանդներ "
+        "և բացել հատուկ հնարավորություններ։",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -224,7 +231,9 @@ async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(context.args[0])
         amount = int(context.args[1])
     except ValueError:
-        await update.message.reply_text("❌ Սխալ ID կամ քանակ։")
+        await update.message.reply_text(
+            "❌ Սխալ ID կամ քանակ։"
+        )
         return
 
     register_user(user_id, "player")
@@ -255,7 +264,9 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(context.args[0])
         amount = int(context.args[1])
     except ValueError:
-        await update.message.reply_text("❌ Սխալ տվյալ։")
+        await update.message.reply_text(
+            "❌ Սխալ տվյալ։"
+        )
         return
 
     current = get_diamonds(user_id)
@@ -275,7 +286,9 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("❌ Միայն ադմինը կարող է սկսել խաղը։")
+        await update.message.reply_text(
+            "❌ Միայն ադմինը կարող է սկսել խաղը։"
+        )
         return
 
     if len(players) < 5:
@@ -290,7 +303,10 @@ async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     role_list = []
 
-    role_list += ["mafia"] * max(1, len(player_ids) // 4)
+    role_list += [
+        "mafia"
+    ] * max(1, len(player_ids) // 4)
+
     role_list += ["doctor"]
     role_list += ["detective"]
     role_list += ["bodyguard"]
@@ -352,6 +368,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
+
+    if not BOT_TOKEN:
+        raise ValueError(
+            "BOT_TOKEN չի գտնվել։ "
+            "Railway Variables-ում ավելացրու BOT_TOKEN։"
+        )
 
     app = Application.builder().token(BOT_TOKEN).build()
 
