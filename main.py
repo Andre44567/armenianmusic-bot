@@ -1,160 +1,373 @@
-import os
-import logging
-from collections import defaultdict
-
-import telebot
-from telebot import types
-from openai import OpenAI
-
-# ---------------------- ԿԱՐԳԱՎՈՐՈՒՄՆԵՐ ----------------------
-
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-START_PHOTO_URL = os.environ.get("START_PHOTO_URL", "")
-
-# Կարող ես փոխել մոդելը (gpt-4o-mini-ն ամենաէժանն ու արագն է)
-MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-
-SYSTEM_PROMPT = (
-    "Դու օգտակար, ընկերասեր AI ասիստենտ ես Telegram-ի բոտում։ "
-    "Պատասխանիր հայերեն, եթե օգտատերը հայերեն է գրում։ Եղիր հակիրճ և պարզ։"
+import sqlite3
+import random
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
 )
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN environment variable-ը սահմանված չէ!")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY environment variable-ը սահմանված չէ!")
+# =========================
+# SETTINGS
+# =========================
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+BOT_TOKEN = "ՔՈ_BOT_TOKENԸ"
+ADMIN_IDS = {123456789} # Այստեղ գրիր քո Telegram ID-ն
 
-bot = telebot.TeleBot(BOT_TOKEN)
-client = OpenAI(api_key=OPENAI_API_KEY)
+DB = "mafia.db"
 
-users = set()
+ROLES = {
+    "mafia": "🔫 Մաֆիա",
+    "doctor": "🩺 Բժիշկ",
+    "detective": "🔎 Դետեկտիվ",
+    "bodyguard": "🛡️ Թիկնապահ",
+    "jester": "🤡 Խելագար",
+    "hunter": "🎯 Որսորդ",
+    "spy": "🕵️ Լրտես",
+    "poisoner": "🧪 Թունավորող",
+}
 
-# Յուրաքանչյուր օգտատիրոջ խոսակցության պատմությունը հիշում ենք հիշողության մեջ
-# (Railway restart-ից հետո մաքրվում է)
-conversations = defaultdict(list)
-MAX_HISTORY = 10  # քանի հաղորդագրություն ենք պահում համատեքստում
+players = {}
+games = {}
 
 
-def is_admin(user_id):
-    return user_id == ADMIN_ID
+# =========================
+# DATABASE
+# =========================
+
+def init_db():
+    db = sqlite3.connect(DB)
+    cur = db.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            diamonds INTEGER DEFAULT 100
+        )
+    """)
+
+    db.commit()
+    db.close()
 
 
-def ask_gpt(chat_id, user_text):
-    conversations[chat_id].append({"role": "user", "content": user_text})
-    # Սահմանափակում ենք պատմության երկարությունը
-    conversations[chat_id] = conversations[chat_id][-MAX_HISTORY:]
+def register_user(user_id, username):
+    db = sqlite3.connect(DB)
+    cur = db.cursor()
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversations[chat_id]
+    cur.execute("""
+        INSERT OR IGNORE INTO users(user_id, username, diamonds)
+        VALUES (?, ?, 100)
+    """, (user_id, username))
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
+    cur.execute("""
+        UPDATE users SET username = ? WHERE user_id = ?
+    """, (username, user_id))
+
+    db.commit()
+    db.close()
+
+
+def get_diamonds(user_id):
+    db = sqlite3.connect(DB)
+    cur = db.cursor()
+
+    cur.execute(
+        "SELECT diamonds FROM users WHERE user_id = ?",
+        (user_id,)
     )
-    reply = response.choices[0].message.content
-    conversations[chat_id].append({"role": "assistant", "content": reply})
-    return reply
+
+    result = cur.fetchone()
+    db.close()
+
+    return result[0] if result else 0
 
 
-# ---------------------- ՀՐԱՄԱՆՆԵՐ ----------------------
+def change_diamonds(user_id, amount):
+    db = sqlite3.connect(DB)
+    cur = db.cursor()
 
-@bot.message_handler(commands=["start"])
-def start_handler(message):
-    users.add(message.chat.id)
-    conversations[message.chat.id] = []
-
-    text = (
-        "👋 Բարի գալուստ!\n\n"
-        "Ես AI ասիստենտ եմ։ Ուղարկիր ինձ ցանկացած հարց կամ հաղորդագրություն, "
-        "և ես կպատասխանեմ։\n\n"
-        "/new — սկսել նոր զրույց (մոռանալ նախորդ խոսակցությունը)\n"
-        "/image [նկարագրություն] — գեներացնել նկար"
+    cur.execute(
+        "UPDATE users SET diamonds = diamonds + ? WHERE user_id = ?",
+        (amount, user_id)
     )
 
-    if START_PHOTO_URL:
-        bot.send_photo(message.chat.id, START_PHOTO_URL, caption=text)
-    else:
-        bot.send_message(message.chat.id, text)
+    db.commit()
+    db.close()
 
 
-@bot.message_handler(commands=["new"])
-def new_conversation_handler(message):
-    conversations[message.chat.id] = []
-    bot.reply_to(message, "🔄 Նոր զրույց սկսվեց։ Նախորդ խոսակցությունը մոռացվեց։")
+# =========================
+# START
+# =========================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    register_user(
+        user.id,
+        user.username or user.first_name
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "💎 Իմ ադամանդները",
+                callback_data="diamonds"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎭 Միանալ Mafia-ին",
+                callback_data="join"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "👤 Պրոֆիլ",
+                callback_data="profile"
+            )
+        ]
+    ]
+
+    await update.message.reply_text(
+        f"Բարի գալուստ, {user.first_name} 👋\n\n"
+        "🎭 Բարի գալուստ Mafia աշխարհ։\n"
+        "💎 Այստեղ կարող ես խաղալ, հավաքել ադամանդներ և բացել հատուկ հնարավորություններ։",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
-@bot.message_handler(commands=["image"])
-def image_handler(message):
-    prompt = message.text.replace("/image", "", 1).strip()
-    if not prompt:
-        bot.reply_to(message, "✏️ Օգտագործում՝ /image նկարագրություն (օրինակ՝ /image կատու, որ նվագում է կիթառ)")
+# =========================
+# DIAMONDS
+# =========================
+
+async def diamonds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    amount = get_diamonds(user.id)
+
+    await update.callback_query.answer()
+
+    await update.callback_query.message.reply_text(
+        f"💎 Քո բալանսը՝ **{amount} 💎**",
+        parse_mode="Markdown"
+    )
+
+
+# =========================
+# PROFILE
+# =========================
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    amount = get_diamonds(user.id)
+
+    await update.callback_query.answer()
+
+    await update.callback_query.message.reply_text(
+        f"👤 **Պրոֆիլ**\n\n"
+        f"Username: @{user.username or 'չկա'}\n"
+        f"ID: `{user.id}`\n"
+        f"💎 Ադամանդներ: **{amount}**",
+        parse_mode="Markdown"
+    )
+
+
+# =========================
+# JOIN GAME
+# =========================
+
+async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    if user.id in players:
+        await update.callback_query.answer(
+            "Դու արդեն խաղում ես 😄",
+            show_alert=True
+        )
         return
 
-    bot.send_chat_action(message.chat.id, "upload_photo")
-    status_msg = bot.reply_to(message, "🎨 Նկարը գեներացվում է, մի պահ...")
+    players[user.id] = {
+        "name": user.first_name,
+        "username": user.username,
+        "role": None,
+        "alive": True
+    }
+
+    await update.callback_query.answer(
+        "Դու միացար խաղին 🎭"
+    )
+
+    await update.callback_query.message.reply_text(
+        f"🎭 {user.first_name} միացավ Mafia-ին։\n"
+        f"👥 Խաղացողների քանակը՝ {len(players)}"
+    )
+
+
+# =========================
+# ADMIN: GIVE DIAMONDS
+# =========================
+
+async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("❌ Դու ադմին չես։")
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "Օրինակ՝\n"
+            "/give 123456789 500"
+        )
+        return
 
     try:
-        result = client.images.generate(
-            model="dall-e-3",
-            prompt=prompt,
-            size="1024x1024",
-            n=1,
+        user_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Սխալ ID կամ քանակ։")
+        return
+
+    register_user(user_id, "player")
+    change_diamonds(user_id, amount)
+
+    await update.message.reply_text(
+        f"✅ Տրվեց {amount} 💎\n"
+        f"👤 User ID: {user_id}"
+    )
+
+
+# =========================
+# ADMIN: REMOVE DIAMONDS
+# =========================
+
+async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("❌ Դու ադմին չես։")
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "/remove USER_ID AMOUNT"
         )
-        image_url = result.data[0].url
-        bot.send_photo(message.chat.id, image_url, caption=f"🎨 {prompt}")
-    except Exception as e:
-        logger.exception("Image generation failed")
-        bot.reply_to(message, "❌ Նկարը չստացվեց գեներացնել։ Փորձիր այլ նկարագրությամբ կամ մի փոքր ուշ։")
-    finally:
+        return
+
+    try:
+        user_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Սխալ տվյալ։")
+        return
+
+    current = get_diamonds(user_id)
+
+    amount = min(amount, current)
+
+    change_diamonds(user_id, -amount)
+
+    await update.message.reply_text(
+        f"✅ Հանվեց {amount} 💎"
+    )
+
+
+# =========================
+# START MAFIA
+# =========================
+
+async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("❌ Միայն ադմինը կարող է սկսել խաղը։")
+        return
+
+    if len(players) < 5:
+        await update.message.reply_text(
+            "❌ Պետք է առնվազն 5 խաղացող։"
+        )
+        return
+
+    player_ids = list(players.keys())
+
+    random.shuffle(player_ids)
+
+    role_list = []
+
+    role_list += ["mafia"] * max(1, len(player_ids) // 4)
+    role_list += ["doctor"]
+    role_list += ["detective"]
+    role_list += ["bodyguard"]
+
+    while len(role_list) < len(player_ids):
+        role_list.append(
+            random.choice([
+                "jester",
+                "hunter",
+                "spy",
+                "poisoner"
+            ])
+        )
+
+    random.shuffle(role_list)
+
+    for user_id, role in zip(player_ids, role_list):
+        players[user_id]["role"] = role
+        players[user_id]["alive"] = True
+
         try:
-            bot.delete_message(message.chat.id, status_msg.message_id)
+            await context.bot.send_message(
+                user_id,
+                f"🎭 Քո դերը՝ **{ROLES[role]}**\n\n"
+                "Գաղտնի պահիր քո դերը։ 🤫",
+                parse_mode="Markdown"
+            )
         except Exception:
             pass
 
-
-@bot.message_handler(commands=["broadcast"])
-def broadcast_handler(message):
-    if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ Այս հրամանը հասանելի է միայն ադմինիստրատորին։")
-        return
-
-    text = message.text.replace("/broadcast", "", 1).strip()
-    if not text:
-        bot.reply_to(message, "✏️ Օգտագործում՝ /broadcast Ձեր հաղորդագրությունը")
-        return
-
-    sent, failed = 0, 0
-    for chat_id in list(users):
-        try:
-            bot.send_message(chat_id, text)
-            sent += 1
-        except Exception:
-            failed += 1
-
-    bot.reply_to(message, f"✅ Ուղարկվեց {sent} օգտատերի։\n❌ Չհաջողվեց՝ {failed}")
+    await update.message.reply_text(
+        "🌙 **Գիշերը սկսվեց...**\n\n"
+        "Բոլորը պատրաստվեք։\n"
+        "Յուրաքանչյուր դեր կստանա իր գործողությունը։",
+        parse_mode="Markdown"
+    )
 
 
-# ---------------------- ՀԱՐՑ-ՊԱՏԱՍԽԱՆ ----------------------
+# =========================
+# CALLBACKS
+# =========================
 
-@bot.message_handler(func=lambda m: m.content_type == "text")
-def chat_handler(message):
-    users.add(message.chat.id)
-    bot.send_chat_action(message.chat.id, "typing")
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
 
-    try:
-        reply = ask_gpt(message.chat.id, message.text)
-        bot.reply_to(message, reply)
-    except Exception as e:
-        logger.exception("GPT request failed")
-        bot.reply_to(message, "❌ Ինչ-որ բան սխալ գնաց AI-ի հետ կապվելիս։ Փորձիր նորից մի փոքր ուշ։")
+    if query.data == "diamonds":
+        await diamonds(update, context)
+
+    elif query.data == "profile":
+        await profile(update, context)
+
+    elif query.data == "join":
+        await join_game(update, context)
 
 
-# ---------------------- ԳՈՐԾԱՐԿՈՒՄ ----------------------
+# =========================
+# MAIN
+# =========================
+
+def main():
+    init_db()
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("give", give))
+    app.add_handler(CommandHandler("remove", remove))
+    app.add_handler(CommandHandler("startgame", start_game))
+
+    app.add_handler(
+        CallbackQueryHandler(callback_handler)
+    )
+
+    print("🤖 Mafia Bot started!")
+
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    logger.info("AI բոտը գործարկվեց...")
-    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    main()
