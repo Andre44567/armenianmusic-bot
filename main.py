@@ -16,8 +16,8 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Այստեղ գրիր ՔՈ Telegram numeric ID-ն
-ADMIN_IDS = {ՔՈ_TELEGRAM_ID}
+# Այստեղ տեղադրեք ձեր Telegram numeric ID-ն (օրինակ՝ {123456789})
+ADMIN_IDS = {123456789}
 
 DB = "mafia.db"
 
